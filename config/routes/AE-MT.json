@@ -1,0 +1,14 @@
+{
+  "description": "UAE -> Malta. SLOT-CHECK ONLY: reach Step 1 (Appointment Details), then for each centre/category/sub-category combination read the 'Earliest available slot' banner and report all results via Telegram. No booking is made.",
+  "mode": "slot-check",
+  "slot_check": {
+    "combinations": [
+      { "label": "Abu Dhabi - Short Stay - General Appointment",
+        "centre": "Abu Dhabi", "category": "Short Stay", "sub_category": "General Appointment" },
+      { "label": "Dubai - Short Stay - Business",
+        "centre": "Dubai", "category": "Short Stay", "sub_category": "Business" },
+      { "label": "Dubai - Short Stay - Tourism",
+        "centre": "Dubai", "category": "Short Stay", "sub_category": "Tourism" }
+    ]
+  }
+}

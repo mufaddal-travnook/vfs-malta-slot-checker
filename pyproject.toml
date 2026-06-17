@@ -1,0 +1,29 @@
+# Project metadata
+[tool.poetry]
+name = "vfs-malta-slot-checker"
+version = "1.0.0"
+description = "VFS Malta Slot Checker — reports earliest VFS Global (UAE -> Malta) appointment slots via Telegram."
+authors = ["Mufaddal <calcutta53.mufaddal@gmail.com>"]
+license = "MIT"
+readme = "README.md"
+keywords = ["vfs", "vfs-malta", "slot-checker", "visa-appointment"]
+packages = [{ include = "src" }]
+
+# Build System
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+# Dependencies
+[tool.poetry.dependencies]
+python = "^3.9"
+playwright = "^1.43.0"
+playwright-stealth = "^1.0.6"
+
+[tool.poetry.dev-dependencies]
+flake8 = "^7.0.0"
+black = "^24.4.2"
+
+# Entry points
+[tool.poetry.scripts]
+vfs-malta-slot-checker = "src.main:main"
