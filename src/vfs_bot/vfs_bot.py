@@ -236,7 +236,7 @@ class VfsBot(ABC):
     @staticmethod
     def _accept_cookies(page, attempts: int = 8, interval_ms: int = 1000) -> bool:
         """Polls for the cookie banner and clicks Accept. Returns True if clicked."""
-        for i in range(attempts):
+        for _ in range(attempts):
             # Strategy 1: OneTrust's stable accept-all id.
             for sel in (
                 "#onetrust-accept-btn-handler",
@@ -453,7 +453,7 @@ class VfsBot(ABC):
         the form model updates even without a real focus/click.
         """
         try:
-            locator.fill(value, timeout=8000)
+            locator.fill(value, timeout=4000)
             return
         except Exception as e:
             logging.info(f"fill() blocked ({e}); using JS value-set fallback.")
@@ -581,14 +581,26 @@ class VfsBot(ABC):
                 )
         logging.info("Sign In enabled; clicking it.")
 
-        try:
-            sign_in.click(timeout=10000)
-        except Exception:
-            # An overlay may be intercepting the pointer event under Xvfb — retry
-            # with force (skips the actionability hit-test).
-            logging.info("Sign In normal click intercepted; retrying with force.")
-            sign_in.click(force=True, timeout=10000)
-        logging.info("Clicked Sign In")
+        # On the slow EC2 box even force-click can exceed its timeout, so try a
+        # normal click, then force, then a JS .click() which dispatches instantly
+        # and can't be blocked by actionability waits.
+        clicked = False
+        for how, kwargs in (("normal", {"timeout": 20000}),
+                            ("force", {"force": True, "timeout": 20000})):
+            try:
+                sign_in.click(**kwargs)
+                clicked = True
+                logging.info(f"Clicked Sign In ({how}).")
+                break
+            except Exception as e:
+                logging.info(f"Sign In {how} click failed ({e}); trying next.")
+        if not clicked:
+            try:
+                sign_in.evaluate("el => el.click()")
+                clicked = True
+                logging.info("Clicked Sign In (JS dispatch).")
+            except Exception as e:
+                raise RetryableError(f"Could not click Sign In: {e}") from e
         VfsBot._take_final_screenshot(page, "after_signin")
         # A Cloudflare captcha dialog often appears right after Sign In and blocks
         # the redirect to the dashboard, so watch for it during this wait.
