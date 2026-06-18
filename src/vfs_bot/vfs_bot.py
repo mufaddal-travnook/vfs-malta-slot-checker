@@ -1008,30 +1008,19 @@ class VfsBot(ABC):
         else:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             path = os.path.join(SCREENSHOT_DIR, f"{timestamp}_{name}.png")
-        # Playwright's screenshot() waits for fonts to load and the page to be
-        # stable, which hangs on VFS's heavy page under Xvfb ('waiting for fonts
-        # to load...'). Disable animations and DON'T let it block: try the normal
-        # call briefly, then fall back to a CDP capture that skips all waits.
+        # Screenshots are diagnostic-only and MUST never hang the flow. Use a
+        # short bounded timeout and disable the font/animation/stability waits.
+        # If it can't capture quickly, log and move on — never block, never use a
+        # CDP fallback (that send() had no timeout and could hang forever, which
+        # stalled a whole run between 'Password entered' and Sign In).
         try:
             page.screenshot(
-                path=path, full_page=False, timeout=4000, animations="disabled"
+                path=path,
+                full_page=False,
+                timeout=5000,
+                animations="disabled",
+                caret="initial",
             )
             logging.info(f"Screenshot saved: {path}")
-            return
         except Exception as e:
-            logging.debug(f"Normal screenshot blocked ({e}); trying CDP capture.")
-        # Fallback: capture via the CDP protocol directly — this does not wait
-        # for fonts/stability, so it always returns something we can look at.
-        try:
-            session = page.context.new_cdp_session(page)
-            data = session.send(
-                "Page.captureScreenshot", {"format": "png", "fromSurface": True}
-            )
-            import base64
-
-            with open(path, "wb") as f:
-                f.write(base64.b64decode(data["data"]))
-            session.detach()
-            logging.info(f"Screenshot saved (CDP): {path}")
-        except Exception as e:
-            logging.warning(f"Failed to take screenshot '{name}': {e}")
+            logging.warning(f"Skipped screenshot '{name}' (non-fatal): {e}")
