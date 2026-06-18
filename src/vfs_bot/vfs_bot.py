@@ -183,6 +183,13 @@ class VfsBot(ABC):
 
             VfsBot._attach_activity_logging(page)
 
+            # Pin a fixed viewport so the page layout (and thus the Turnstile
+            # checkbox position for the coordinate click) is deterministic.
+            try:
+                page.set_viewport_size({"width": 1280, "height": 1024})
+            except Exception as e:
+                logging.debug(f"Could not set viewport: {e}")
+
             # Always (re)load the login URL fresh — we just cleared the VFS
             # session, so this loads the clean login page with Cloudflare
             # clearance still intact.
@@ -332,6 +339,48 @@ class VfsBot(ABC):
         return False
 
     @staticmethod
+    def _click_turnstile_by_coords(page) -> bool:
+        """
+        Attempts to click the Turnstile 'Verify you are human' checkbox by
+        coordinates. The challenge iframe is cross-origin-isolated so its
+        checkbox can't be targeted as an element — but a real mouse click at the
+        widget's on-screen position can still land it.
+
+        We anchor on the `cf-turnstile-response` token input (always present),
+        find the nearest sized ancestor (the visible widget), and click near its
+        left edge, vertically centred (where the checkbox renders).
+        """
+        try:
+            box = page.evaluate(
+                """() => {
+                    const inp = document.querySelector("input[name='cf-turnstile-response']");
+                    if (!inp) return null;
+                    let el = inp;
+                    for (let i = 0; i < 6 && el; i++) {
+                        const r = el.getBoundingClientRect();
+                        if (r.width > 50 && r.height > 30) {
+                            return {x: r.x, y: r.y, w: r.width, h: r.height};
+                        }
+                        el = el.parentElement;
+                    }
+                    return null;
+                }"""
+            )
+            if not box:
+                logging.debug("Turnstile widget box not found; can't coord-click.")
+                return False
+            x = box["x"] + 30      # checkbox is near the left edge
+            y = box["y"] + box["h"] / 2
+            logging.info(f"Clicking Turnstile checkbox by coordinates ({x:.0f}, {y:.0f}).")
+            page.mouse.move(x, y)
+            page.wait_for_timeout(300)
+            page.mouse.click(x, y)
+            return True
+        except Exception as e:
+            logging.warning(f"Coordinate-click of Turnstile failed: {e}")
+            return False
+
+    @staticmethod
     def _fill_field(page, locator, value: str) -> None:
         """
         Sets an input's value robustly, immune to overlays and Xvfb hangs.
@@ -373,6 +422,7 @@ class VfsBot(ABC):
                 f"slow load): {e}"
             ) from e
         logging.info("Login form loaded")
+        VfsBot._write_screenshot(page, "Loginformloaded", fixed_name=True)
 
         # Dismiss the cookie banner (it overlays the form and blocks fields).
         self.pre_login_steps(page)
@@ -398,7 +448,15 @@ class VfsBot(ABC):
                 f"Waiting for Cloudflare Turnstile to pass "
                 f"(try {turn_attempt}/{TURNSTILE_REFRESH_ATTEMPTS + 1})..."
             )
-            if VfsBot._wait_for_signin_enabled(page, sign_in, timeout_ms=45000):
+            # Give it ~10s to auto-solve first.
+            if VfsBot._wait_for_signin_enabled(page, sign_in, timeout_ms=10000):
+                passed = True
+                break
+
+            # Didn't auto-solve — try clicking the checkbox by coordinates, then
+            # wait a short while again for it to flip enabled.
+            VfsBot._click_turnstile_by_coords(page)
+            if VfsBot._wait_for_signin_enabled(page, sign_in, timeout_ms=10000):
                 passed = True
                 break
 
@@ -866,9 +924,14 @@ class VfsBot(ABC):
         VfsBot._write_screenshot(page, name)
 
     @staticmethod
-    def _write_screenshot(page, name: str):
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        path = os.path.join(SCREENSHOT_DIR, f"{timestamp}_{name}.png")
+    def _write_screenshot(page, name: str, fixed_name: bool = False):
+        # fixed_name=True writes exactly <name>.png (overwritten each run) so you
+        # can always find e.g. Loginformloaded.png; otherwise it's timestamped.
+        if fixed_name:
+            path = os.path.join(SCREENSHOT_DIR, f"{name}.png")
+        else:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            path = os.path.join(SCREENSHOT_DIR, f"{timestamp}_{name}.png")
         # Playwright's screenshot() waits for fonts to load and the page to be
         # stable, which hangs on VFS's heavy page under Xvfb ('waiting for fonts
         # to load...'). Disable animations and DON'T let it block: try the normal
