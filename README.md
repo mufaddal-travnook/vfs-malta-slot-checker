@@ -58,6 +58,19 @@ export VFS_BOT_CONFIG_PATH=/etc/vfs/config.local.ini
 
 It's read last, so its values win over the committed `config.ini`.
 
+### Secret-leak guard (enable after cloning)
+
+A pre-commit hook in [`scripts/pre-commit`](scripts/pre-commit) blocks any commit
+whose staged changes contain a real-looking credential, so a secret can't slip
+into `config/config.ini` by accident. Enable it once per clone:
+
+```bash
+git config core.hooksPath scripts
+```
+
+Real credentials belong in `config/config.local.ini` (gitignored) — never in the
+tracked `config/config.ini`.
+
 ## Run
 
 One-off:
