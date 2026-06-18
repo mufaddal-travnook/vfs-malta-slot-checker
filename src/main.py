@@ -101,6 +101,12 @@ def initialize_logger():
         format="[%(asctime)s] %(levelname)s [%(filename)s:%(lineno)d] %(message)s",
         handlers=[file_handler, stream_handler],
     )
+
+    # Silence chatty third-party loggers (asyncio event-loop internals,
+    # Playwright protocol) so our own progress logs stay readable even at DEBUG.
+    for noisy in ("asyncio", "playwright", "urllib3", "websockets"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
+
     logging.info(f"Logging initialized at level {logging.getLevelName(level)}.")
 
 
