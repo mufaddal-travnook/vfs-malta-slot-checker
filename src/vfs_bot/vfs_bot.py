@@ -215,34 +215,35 @@ class VfsBot(ABC):
 
     def pre_login_steps(self, page) -> None:
         """
-        Dismiss the OneTrust cookie consent banner if present.
+        Accept ALL cookies on the OneTrust consent banner if present.
 
-        The banner overlays the bottom of the page and intercepts pointer/focus
-        events, so it must be cleared before we touch the login fields (otherwise
-        focus()/click() on the email field hangs). VFS shows different buttons
-        ('Accept Cookies', 'Reject All', or a close 'X'), so try them in order.
+        We deliberately ACCEPT (never reject) — both because that's the desired
+        behaviour and because the banner overlays the bottom of the page and
+        intercepts pointer/focus events, so it must be cleared before we touch
+        the login fields (otherwise filling the email field hangs).
         """
-        labels = ["Accept Cookies", "Accept All", "Reject All", "Accept", "Close"]
-        for label in labels:
-            try:
-                btn = page.get_by_role("button", name=label).first
-                if btn.count() > 0 and btn.is_visible():
-                    btn.click(timeout=4000)
-                    logging.info(f"Dismissed cookie banner via '{label}'.")
-                    page.wait_for_timeout(800)
-                    return
-            except Exception:
-                continue
-        # Fallback: OneTrust's accept button by its stable id.
+        # OneTrust's accept-all button has a stable id — try it first.
         try:
             ot = page.locator("#onetrust-accept-btn-handler").first
             if ot.count() > 0 and ot.is_visible():
                 ot.click(timeout=4000)
-                logging.info("Dismissed cookie banner via OneTrust accept id.")
+                logging.info("Accepted all cookies (OneTrust accept-all).")
                 page.wait_for_timeout(800)
                 return
         except Exception:
             pass
+        # Fallback: accept-only button labels (NO reject/close, so we never
+        # accidentally reject cookies).
+        for label in ["Accept Cookies", "Accept All Cookies", "Accept All", "Accept"]:
+            try:
+                btn = page.get_by_role("button", name=label).first
+                if btn.count() > 0 and btn.is_visible():
+                    btn.click(timeout=4000)
+                    logging.info(f"Accepted all cookies via '{label}'.")
+                    page.wait_for_timeout(800)
+                    return
+            except Exception:
+                continue
         logging.debug("No cookie banner found, skipping")
 
     # Cookie domains to PRESERVE across runs — Cloudflare's clearance lives here.
