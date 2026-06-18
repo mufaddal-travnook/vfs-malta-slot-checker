@@ -33,8 +33,10 @@ from src.utils.config_reader import (
 from src.vfs_bot.vfs_bot import RetryableError
 from src.vfs_bot.vfs_bot_factory import UnsupportedCountryError, get_vfs_bot
 
-# Retry policy.
-MAX_ATTEMPTS = 4
+# Retry policy. Set to 1 for now (single browser launch per run); the bot does
+# its own inner Turnstile-refresh retries. Bump this to relaunch a fresh browser
+# on failure once the Cloudflare behaviour on this IP is understood.
+MAX_ATTEMPTS = 1
 BACKOFF_SECONDS = 15
 CDP_PORT = 9222
 

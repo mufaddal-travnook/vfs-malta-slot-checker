@@ -29,6 +29,12 @@ SCREENSHOT_DIR = "screenshots"
 # step-by-step debugging.
 SCREENSHOTS_ENABLED = False
 
+# How many times to RELOAD the login page to retry a stuck Cloudflare Turnstile
+# before giving up (a reload re-runs the challenge and often unsticks it). This
+# is a cheap inner retry within one browser; the supervisor's browser relaunch
+# is the outer retry.
+TURNSTILE_REFRESH_ATTEMPTS = 2
+
 USERNAME_SELECTOR = (
     "input[formcontrolname='username'], #mat-input-0, input[placeholder*='email']"
 )
@@ -367,19 +373,63 @@ class VfsBot(ABC):
             ) from e
         logging.info("Login form loaded")
 
+        # Dismiss the cookie banner (it overlays the form and blocks fields).
+        self.pre_login_steps(page)
+
+        # --- Turnstile FIRST -------------------------------------------------
+        # Check the Cloudflare 'Verify you are human' challenge BEFORE touching
+        # the credentials — no point filling a form we can't submit. The Sign In
+        # button is enabled only once Turnstile passes, so that's our signal.
+        #
+        # Inner retry: a stuck Turnstile is often unstuck by a page reload (it
+        # re-runs the challenge with more signals), which is far cheaper than
+        # relaunching the whole browser. Try the wait, and on failure reload and
+        # try again a couple of times before giving up to the supervisor.
+        sign_in = page.get_by_role("button", name="Sign In").first
+        passed = False
+        for turn_attempt in range(1, TURNSTILE_REFRESH_ATTEMPTS + 2):  # 1 + N reloads
+            try:
+                sign_in.wait_for(state="visible", timeout=10000)
+            except Exception as e:
+                raise SignInDisabledError(f"Sign In button not visible: {e}") from e
+
+            logging.info(
+                f"Waiting for Cloudflare Turnstile to pass "
+                f"(try {turn_attempt}/{TURNSTILE_REFRESH_ATTEMPTS + 1})..."
+            )
+            if VfsBot._wait_for_signin_enabled(page, sign_in, timeout_ms=45000):
+                passed = True
+                break
+
+            # Not passed — reload and re-run the challenge, unless out of tries.
+            if turn_attempt <= TURNSTILE_REFRESH_ATTEMPTS:
+                logging.info("Turnstile not passed — refreshing the page to retry.")
+                VfsBot._take_final_screenshot(page, f"turnstile_fail_{turn_attempt}")
+                try:
+                    page.reload(timeout=60000, wait_until="domcontentloaded")
+                except Exception as e:
+                    logging.warning(f"Reload failed: {e}")
+                try:
+                    page.wait_for_selector(USERNAME_SELECTOR, timeout=120000)
+                except Exception as e:
+                    raise LoginFormNotReadyError(
+                        f"Login form did not reappear after reload: {e}"
+                    ) from e
+                self.pre_login_steps(page)
+                sign_in = page.get_by_role("button", name="Sign In").first
+
+        if not passed:
+            VfsBot._take_final_screenshot(page, "turnstile_failed_final")
+            raise SignInDisabledError(
+                "Cloudflare 'Verify you are human' did not pass after "
+                f"{TURNSTILE_REFRESH_ATTEMPTS} refresh(es) — Sign In stayed disabled."
+            )
+
+        # --- Turnstile passed: now fill credentials --------------------------
         email_input = page.locator(USERNAME_SELECTOR).first
         password_input = page.locator(PASSWORD_SELECTOR).first
 
-        # The cookie banner often appears only after the form renders — dismiss
-        # it again here so it isn't overlaying the fields when we focus them.
-        self.pre_login_steps(page)
-
-        # Fill via JS value-set + input event rather than focus()/type(): under
-        # Xvfb, focus() does an actionability wait that an overlay can block,
-        # hanging for 30s. Setting the value directly and dispatching 'input'
-        # makes Angular pick it up without any pointer/focus hit-test. We bound
-        # every interaction with a short timeout so nothing can hang the run.
-        logging.info("Filling email field...")
+        logging.info("Turnstile passed. Filling email field...")
         VfsBot._fill_field(page, email_input, email_id)
         page.wait_for_timeout(500)
         logging.info("Email entered; filling password field...")
@@ -389,27 +439,12 @@ class VfsBot(ABC):
         logging.info("Password entered; about to click Sign In...")
         VfsBot._take_final_screenshot(page, "before_signin")
 
-        sign_in = page.get_by_role("button", name="Sign In").first
-        # If the Sign In button is still disabled, the Cloudflare 'Verify you are
-        # human' challenge was not passed — there's no point typing/clicking
-        # further. Signal a retry so the supervisor relaunches a fresh browser
-        # (which usually gets a clean Cloudflare pass).
-        try:
-            sign_in.wait_for(state="visible", timeout=10000)
-        except Exception as e:
-            raise SignInDisabledError(f"Sign In button not visible: {e}") from e
-
-        # Wait for the Cloudflare Turnstile to auto-solve. The 'Verify you are
-        # human' widget runs a background check and only then enables Sign In
-        # (and populates the cf-turnstile-response token). On a trusted/real
-        # Chrome this clears on its own within a few-to-tens of seconds, so we
-        # poll up to ~60s rather than giving up after 3s. If it never enables,
-        # raise so the supervisor retries with a fresh browser.
-        if not VfsBot._wait_for_signin_enabled(page, sign_in, timeout_ms=60000):
-            raise SignInDisabledError(
-                "Sign In stayed disabled after 60s — Cloudflare 'Verify you are "
-                "human' did not auto-solve."
-            )
+        # Re-confirm Sign In is still enabled after filling (Angular re-validates).
+        if not sign_in.is_enabled():
+            if not VfsBot._wait_for_signin_enabled(page, sign_in, timeout_ms=15000):
+                raise SignInDisabledError(
+                    "Sign In became disabled again after filling credentials."
+                )
 
         try:
             sign_in.click(timeout=10000)
@@ -833,11 +868,30 @@ class VfsBot(ABC):
     def _write_screenshot(page, name: str):
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         path = os.path.join(SCREENSHOT_DIR, f"{timestamp}_{name}.png")
+        # Playwright's screenshot() waits for fonts to load and the page to be
+        # stable, which hangs on VFS's heavy page under Xvfb ('waiting for fonts
+        # to load...'). Disable animations and DON'T let it block: try the normal
+        # call briefly, then fall back to a CDP capture that skips all waits.
         try:
-            # Viewport-only with a short timeout: full_page can hang on heavy
-            # pages (it did under Xvfb, timing out at 30s). Screenshots are
-            # diagnostic-only, so never let one stall the flow.
-            page.screenshot(path=path, full_page=False, timeout=8000)
+            page.screenshot(
+                path=path, full_page=False, timeout=4000, animations="disabled"
+            )
             logging.info(f"Screenshot saved: {path}")
+            return
+        except Exception as e:
+            logging.debug(f"Normal screenshot blocked ({e}); trying CDP capture.")
+        # Fallback: capture via the CDP protocol directly — this does not wait
+        # for fonts/stability, so it always returns something we can look at.
+        try:
+            session = page.context.new_cdp_session(page)
+            data = session.send(
+                "Page.captureScreenshot", {"format": "png", "fromSurface": True}
+            )
+            import base64
+
+            with open(path, "wb") as f:
+                f.write(base64.b64decode(data["data"]))
+            session.detach()
+            logging.info(f"Screenshot saved (CDP): {path}")
         except Exception as e:
             logging.warning(f"Failed to take screenshot '{name}': {e}")
