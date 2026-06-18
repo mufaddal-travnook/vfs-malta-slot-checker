@@ -248,17 +248,23 @@ class VfsBot(ABC):
         email_input = page.locator(USERNAME_SELECTOR).first
         password_input = page.locator(PASSWORD_SELECTOR).first
 
+        # Use focus()+type instead of click()+press_sequentially: a real mouse
+        # click does a pointer hit-test that an overlay (Cloudflare Turnstile
+        # iframe, cookie banner) can intercept, causing click() to hang — which
+        # is exactly what happens under Xvfb on the server. focus() bypasses the
+        # hit-test, and type() still sends per-character key events for a
+        # human-like cadence.
         logging.info("Filling email field...")
-        email_input.click()
+        email_input.focus()
+        page.wait_for_timeout(500)
+        email_input.type(email_id, delay=120)
         page.wait_for_timeout(800)
-        email_input.press_sequentially(email_id, delay=200)
-        page.wait_for_timeout(1200)
         logging.info("Email entered; filling password field...")
 
-        password_input.click()
-        page.wait_for_timeout(800)
-        password_input.press_sequentially(password, delay=200)
-        page.wait_for_timeout(1500)
+        password_input.focus()
+        page.wait_for_timeout(500)
+        password_input.type(password, delay=120)
+        page.wait_for_timeout(1000)
         logging.info("Password entered; about to click Sign In...")
         VfsBot._take_final_screenshot(page, "before_signin")
 
@@ -280,7 +286,13 @@ class VfsBot(ABC):
                 "was not passed."
             )
 
-        sign_in.click()
+        try:
+            sign_in.click(timeout=10000)
+        except Exception:
+            # An overlay may be intercepting the pointer event under Xvfb — retry
+            # with force (skips the actionability hit-test).
+            logging.info("Sign In normal click intercepted; retrying with force.")
+            sign_in.click(force=True, timeout=10000)
         logging.info("Clicked Sign In")
         VfsBot._take_final_screenshot(page, "after_signin")
         # A Cloudflare captcha dialog often appears right after Sign In and blocks
@@ -697,7 +709,10 @@ class VfsBot(ABC):
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         path = os.path.join(SCREENSHOT_DIR, f"{timestamp}_{name}.png")
         try:
-            page.screenshot(path=path, full_page=True)
+            # Viewport-only with a short timeout: full_page can hang on heavy
+            # pages (it did under Xvfb, timing out at 30s). Screenshots are
+            # diagnostic-only, so never let one stall the flow.
+            page.screenshot(path=path, full_page=False, timeout=8000)
             logging.info(f"Screenshot saved: {path}")
         except Exception as e:
             logging.warning(f"Failed to take screenshot '{name}': {e}")
