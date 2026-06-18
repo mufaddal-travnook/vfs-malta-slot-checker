@@ -222,36 +222,65 @@ class VfsBot(ABC):
 
     def pre_login_steps(self, page) -> None:
         """
-        Accept ALL cookies on the OneTrust consent banner if present.
+        Accept ALL cookies on the consent banner. We deliberately ACCEPT (never
+        reject) — both as the desired behaviour and because the banner overlays
+        the bottom of the page and blocks the login fields until cleared.
 
-        We deliberately ACCEPT (never reject) — both because that's the desired
-        behaviour and because the banner overlays the bottom of the page and
-        intercepts pointer/focus events, so it must be cleared before we touch
-        the login fields (otherwise filling the email field hangs).
+        The banner often appears a few seconds AFTER the form, so we poll for it
+        for a short while, and we click via several strategies (the OneTrust id,
+        an exact-text 'Accept Cookies' button/link, force-click) because a single
+        role-based lookup was missing it.
         """
-        # OneTrust's accept-all button has a stable id — try it first.
-        try:
-            ot = page.locator("#onetrust-accept-btn-handler").first
-            if ot.count() > 0 and ot.is_visible():
-                ot.click(timeout=4000)
-                logging.info("Accepted all cookies (OneTrust accept-all).")
-                page.wait_for_timeout(800)
-                return
-        except Exception:
-            pass
-        # Fallback: accept-only button labels (NO reject/close, so we never
-        # accidentally reject cookies).
-        for label in ["Accept Cookies", "Accept All Cookies", "Accept All", "Accept"]:
+        VfsBot._accept_cookies(page, attempts=8, interval_ms=1000)
+
+    @staticmethod
+    def _accept_cookies(page, attempts: int = 8, interval_ms: int = 1000) -> bool:
+        """Polls for the cookie banner and clicks Accept. Returns True if clicked."""
+        for i in range(attempts):
+            # Strategy 1: OneTrust's stable accept-all id.
+            for sel in (
+                "#onetrust-accept-btn-handler",
+                "button#onetrust-accept-btn-handler",
+            ):
+                try:
+                    el = page.locator(sel).first
+                    if el.count() > 0 and el.is_visible():
+                        el.click(timeout=3000, force=True)
+                        logging.info("Accepted all cookies (OneTrust id).")
+                        page.wait_for_timeout(600)
+                        return True
+                except Exception:
+                    pass
+
+            # Strategy 2: any clickable element whose visible text is an accept
+            # label (button OR link), exact-ish match, force-clicked.
             try:
-                btn = page.get_by_role("button", name=label).first
+                btn = page.get_by_text("Accept Cookies", exact=True).first
                 if btn.count() > 0 and btn.is_visible():
-                    btn.click(timeout=4000)
-                    logging.info(f"Accepted all cookies via '{label}'.")
-                    page.wait_for_timeout(800)
-                    return
+                    btn.click(timeout=3000, force=True)
+                    logging.info("Accepted all cookies (text 'Accept Cookies').")
+                    page.wait_for_timeout(600)
+                    return True
             except Exception:
-                continue
-        logging.debug("No cookie banner found, skipping")
+                pass
+
+            # Strategy 3: role-based fallbacks.
+            for label in ["Accept Cookies", "Accept All Cookies", "Accept All", "Accept"]:
+                try:
+                    btn = page.get_by_role("button", name=label).first
+                    if btn.count() > 0 and btn.is_visible():
+                        btn.click(timeout=3000, force=True)
+                        logging.info(f"Accepted all cookies via '{label}'.")
+                        page.wait_for_timeout(600)
+                        return True
+                except Exception:
+                    continue
+
+            # Banner not present yet — wait and poll again.
+            page.wait_for_timeout(interval_ms)
+
+        logging.debug("No cookie banner found after polling, skipping.")
+        return False
 
     # Cookie domains to PRESERVE across runs — Cloudflare's clearance lives here.
     # Everything else on the VFS domains (the login/auth session) is cleared so
