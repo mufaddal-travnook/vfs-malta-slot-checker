@@ -368,6 +368,39 @@ class VfsBot(ABC):
         return False
 
     @staticmethod
+    def _turnstile_token(page) -> str:
+        """Returns the current cf-turnstile-response token value (or '')."""
+        try:
+            return page.evaluate(
+                "() => { const i = document.querySelector(\"input[name='cf-turnstile-response']\");"
+                " return i ? i.value : ''; }"
+            ) or ""
+        except Exception:
+            return ""
+
+    @staticmethod
+    def _wait_for_turnstile_passed(page, timeout_ms: int) -> bool:
+        """
+        Waits until the Cloudflare Turnstile is solved — i.e. the
+        cf-turnstile-response token is populated.
+
+        This is the correct gate (NOT the Sign In button): VFS only enables Sign
+        In once the token exists AND the credentials are filled, so we must wait
+        on the token, then fill the form, after which Sign In enables on its own.
+        """
+        step_ms = 1000
+        waited = 0
+        while waited < timeout_ms:
+            if VfsBot._turnstile_token(page):
+                logging.info(f"Turnstile passed (token populated) after {waited/1000:.0f}s.")
+                return True
+            page.wait_for_timeout(step_ms)
+            waited += step_ms
+            if waited % 10000 == 0:
+                logging.info(f"Waiting for Turnstile to pass... ({waited/1000:.0f}s)")
+        return False
+
+    @staticmethod
     def _click_turnstile_by_coords(page) -> bool:
         """
         Attempts to click the Turnstile 'Verify you are human' checkbox by
@@ -465,27 +498,38 @@ class VfsBot(ABC):
         # re-runs the challenge with more signals), which is far cheaper than
         # relaunching the whole browser. Try the wait, and on failure reload and
         # try again a couple of times before giving up to the supervisor.
-        sign_in = page.get_by_role("button", name="Sign In").first
+        # We gate on the TURNSTILE TOKEN, not the Sign In button: VFS keeps Sign
+        # In disabled until the token exists AND the fields are filled, so waiting
+        # on the button here would deadlock (we fill the fields only after). Once
+        # the token is populated we fill credentials, and Sign In enables itself.
         passed = False
         for turn_attempt in range(1, TURNSTILE_REFRESH_ATTEMPTS + 2):  # 1 + N reloads
-            try:
-                sign_in.wait_for(state="visible", timeout=10000)
-            except Exception as e:
-                raise SignInDisabledError(f"Sign In button not visible: {e}") from e
-
             logging.info(
                 f"Waiting for Cloudflare Turnstile to pass "
                 f"(try {turn_attempt}/{TURNSTILE_REFRESH_ATTEMPTS + 1})..."
             )
+            # Local headed analysis: set [turnstile] manual_wait_seconds so you
+            # can click the checkbox by hand; we just wait that long for the token
+            # and don't coord-click or refresh.
+            manual_wait = int(get_config_value("turnstile", "manual_wait_seconds", "0"))
+            if manual_wait > 0:
+                logging.info(
+                    f"MANUAL MODE: click the 'Verify you are human' checkbox in the "
+                    f"Chrome window — waiting up to {manual_wait}s..."
+                )
+                if VfsBot._wait_for_turnstile_passed(page, timeout_ms=manual_wait * 1000):
+                    passed = True
+                break  # don't auto-refresh in manual mode
+
             # Give it ~10s to auto-solve first.
-            if VfsBot._wait_for_signin_enabled(page, sign_in, timeout_ms=10000):
+            if VfsBot._wait_for_turnstile_passed(page, timeout_ms=10000):
                 passed = True
                 break
 
             # Didn't auto-solve — try clicking the checkbox by coordinates, then
-            # wait a short while again for it to flip enabled.
+            # wait a short while again for the token.
             VfsBot._click_turnstile_by_coords(page)
-            if VfsBot._wait_for_signin_enabled(page, sign_in, timeout_ms=10000):
+            if VfsBot._wait_for_turnstile_passed(page, timeout_ms=10000):
                 passed = True
                 break
 
@@ -504,13 +548,12 @@ class VfsBot(ABC):
                         f"Login form did not reappear after reload: {e}"
                     ) from e
                 self.pre_login_steps(page)
-                sign_in = page.get_by_role("button", name="Sign In").first
 
         if not passed:
             VfsBot._take_final_screenshot(page, "turnstile_failed_final")
             raise SignInDisabledError(
                 "Cloudflare 'Verify you are human' did not pass after "
-                f"{TURNSTILE_REFRESH_ATTEMPTS} refresh(es) — Sign In stayed disabled."
+                f"{TURNSTILE_REFRESH_ATTEMPTS} refresh(es) — token never populated."
             )
 
         # --- Turnstile passed: now fill credentials --------------------------
@@ -524,15 +567,19 @@ class VfsBot(ABC):
 
         VfsBot._fill_field(page, password_input, password)
         page.wait_for_timeout(800)
-        logging.info("Password entered; about to click Sign In...")
+        logging.info("Password entered; waiting for Sign In to enable...")
         VfsBot._take_final_screenshot(page, "before_signin")
 
-        # Re-confirm Sign In is still enabled after filling (Angular re-validates).
+        # Now that the token exists AND the fields are filled, Sign In should
+        # enable. Wait for it (this is the correct point to wait on the button).
+        sign_in = page.get_by_role("button", name="Sign In").first
         if not sign_in.is_enabled():
-            if not VfsBot._wait_for_signin_enabled(page, sign_in, timeout_ms=15000):
+            if not VfsBot._wait_for_signin_enabled(page, sign_in, timeout_ms=20000):
                 raise SignInDisabledError(
-                    "Sign In became disabled again after filling credentials."
+                    "Sign In stayed disabled after Turnstile passed and credentials "
+                    "were filled."
                 )
+        logging.info("Sign In enabled; clicking it.")
 
         try:
             sign_in.click(timeout=10000)
