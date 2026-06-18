@@ -22,7 +22,6 @@ import os
 import platform
 import shutil
 import subprocess
-import tempfile
 import time
 import urllib.request
 
@@ -93,16 +92,20 @@ class ChromeProcess:
         self.startup_timeout_s = startup_timeout_s
         self._proc = None
 
-        # Each run gets a FRESH, throwaway profile so no cookies/session state
-        # leak between runs. Reusing a profile carries over an expired VFS session
-        # cookie, which makes the site show "Session Expired or Invalid" instead
-        # of the login form. We create a unique temp dir and delete it on close().
+        # Use a STABLE, persistent profile dir by default. This is deliberate:
+        # Cloudflare's clearance cookie (cf_clearance) lives in the profile, and
+        # keeping it across runs is what lets us avoid the 403 challenge wall on a
+        # datacenter IP. We do NOT want a throwaway profile here (that triggers a
+        # fresh 403 every run). The stale VFS *login* session that a persistent
+        # profile would otherwise carry is cleared separately, at run start, by
+        # the bot (see VfsBot._clear_site_session) — so we keep Cloudflare's
+        # cookies but drop VFS's. Pass profile_dir=... to override.
         if profile_dir:
             self.profile_dir = profile_dir
-            self._owns_profile = False  # caller-supplied; don't delete it
         else:
-            self.profile_dir = tempfile.mkdtemp(prefix=f"vfs-chrome-{port}-")
-            self._owns_profile = True
+            base = os.environ.get("TEMP") or "/tmp"
+            self.profile_dir = os.path.join(base, f"vfs-chrome-profile-{port}")
+        self._owns_profile = False  # persistent — never delete it on close
 
     @property
     def cdp_url(self) -> str:

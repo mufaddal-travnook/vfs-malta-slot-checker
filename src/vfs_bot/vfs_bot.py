@@ -133,7 +133,6 @@ class VfsBot(ABC):
 
         with sync_playwright() as p:
             cdp_url = get_config_value("browser", "cdp_url")
-            reused_existing_page = False
             if cdp_url:
                 # Attach to an existing Chrome launched with --remote-debugging-port.
                 # On EC2 the supervisor launches/kills that Chrome; locally you run
@@ -148,23 +147,16 @@ class VfsBot(ABC):
                 context = (
                     browser.contexts[0] if browser.contexts else browser.new_context()
                 )
-                # Prefer an existing tab already on the VFS site — when attaching
-                # via CDP the whole point is to reuse a tab you loaded PAST the
-                # anti-bot spinner manually, not to open a fresh one that hits it
-                # again. Fall back to a new tab only if no VFS tab is open.
-                page = None
-                for existing in context.pages:
-                    try:
-                        if "vfsglobal.com" in (existing.url or ""):
-                            page = existing
-                            reused_existing_page = True
-                            logging.info(f"Reusing existing VFS tab: {existing.url}")
-                            break
-                    except Exception:
-                        continue
-                if page is None:
-                    page = context.new_page()
-                    logging.info("No existing VFS tab found — opened a new tab.")
+                # Drop only VFS's stale login/session cookies while KEEPING
+                # Cloudflare's clearance (cf_clearance / __cf*). The persistent
+                # profile keeps cf_clearance so we don't get a fresh 403, but its
+                # old VFS session would otherwise land us on "Session Expired" —
+                # clearing it makes each run log in fresh.
+                VfsBot._clear_site_session(context)
+                # Reuse Chrome's startup tab if present, else open one. Either way
+                # we (re)navigate below so the page loads with clearance kept but
+                # the VFS session gone.
+                page = context.pages[0] if context.pages else context.new_page()
             else:
                 # Launch our own browser (the prod path — headless on a server).
                 is_headless = headless_mode in ("True", "true")
@@ -185,17 +177,11 @@ class VfsBot(ABC):
 
             VfsBot._attach_activity_logging(page)
 
-            if reused_existing_page:
-                # The tab is already on VFS (loaded past the spinner manually);
-                # don't reload it — just bring it to front and proceed.
-                logging.info(f"Using already-loaded page: {page.url}")
-                try:
-                    page.bring_to_front()
-                except Exception:
-                    pass
-            else:
-                logging.info(f"Navigating to {vfs_url}")
-                page.goto(vfs_url, timeout=60000, wait_until="domcontentloaded")
+            # Always (re)load the login URL fresh — we just cleared the VFS
+            # session, so this loads the clean login page with Cloudflare
+            # clearance still intact.
+            logging.info(f"Navigating to {vfs_url}")
+            page.goto(vfs_url, timeout=60000, wait_until="domcontentloaded")
 
             self.pre_login_steps(page)
 
@@ -229,6 +215,50 @@ class VfsBot(ABC):
             logging.debug("Rejected all cookie policies")
         except Exception:
             logging.debug("No cookie policy button found, skipping")
+
+    # Cookie domains to PRESERVE across runs — Cloudflare's clearance lives here.
+    # Everything else on the VFS domains (the login/auth session) is cleared so
+    # each run starts logged-out but still trusted by Cloudflare.
+    _KEEP_COOKIE_NAMES = ("cf_clearance",)
+    _KEEP_COOKIE_PREFIXES = ("__cf", "__cflb", "cf_")
+
+    @staticmethod
+    def _clear_site_session(context) -> None:
+        """
+        Clears VFS's stale login/session cookies while KEEPING Cloudflare's
+        clearance cookies (cf_clearance / __cf*).
+
+        Why: we run on a persistent Chrome profile so Cloudflare's clearance
+        survives between runs (avoiding a fresh 403 on a datacenter IP). But that
+        same profile would carry an expired VFS *login* session, landing us on
+        "Session Expired or Invalid". So we surgically drop the VFS cookies and
+        re-keep the Cloudflare ones by re-adding them after a full clear.
+        """
+        try:
+            all_cookies = context.cookies()
+        except Exception as e:
+            logging.warning(f"Could not read cookies to clear session: {e}")
+            return
+
+        def _is_cloudflare(c) -> bool:
+            name = c.get("name", "")
+            return name in VfsBot._KEEP_COOKIE_NAMES or any(
+                name.startswith(p) for p in VfsBot._KEEP_COOKIE_PREFIXES
+            )
+
+        keep = [c for c in all_cookies if _is_cloudflare(c)]
+        dropped = len(all_cookies) - len(keep)
+
+        try:
+            context.clear_cookies()  # nukes everything...
+            if keep:
+                context.add_cookies(keep)  # ...then restore Cloudflare's only
+            logging.info(
+                f"Cleared {dropped} VFS session cookie(s); kept {len(keep)} "
+                f"Cloudflare cookie(s)."
+            )
+        except Exception as e:
+            logging.warning(f"Failed to selectively clear cookies: {e}")
 
     def login(self, page, email_id: str, password: str) -> None:
         """
