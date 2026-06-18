@@ -43,8 +43,9 @@ def main() -> None:
     parser.add_argument("--once", action="store_true", help="Run a single cycle and exit.")
     args = parser.parse_args()
 
-    initialize_logger()
+    # Config first so the logger can read [logging] level / LOG_LEVEL.
     initialize_config()
+    initialize_logger()
 
     if args.once:
         run_once(args.source, args.dest)

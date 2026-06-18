@@ -1,8 +1,9 @@
 import argparse
 import logging
+import os
 import sys
 
-from src.utils.config_reader import initialize_config
+from src.utils.config_reader import get_config_value, initialize_config
 from src.vfs_bot.vfs_bot import LoginError
 from src.vfs_bot.vfs_bot_factory import UnsupportedCountryError, get_vfs_bot
 
@@ -15,8 +16,9 @@ def main() -> None:
     combination, and reports the results via Telegram. Defaults to the UAE ->
     Malta route (AE / MT); override with -sc / -dc if needed.
     """
-    initialize_logger()
+    # Config must be read first so the logger can pick up [logging] level.
     initialize_config()
+    initialize_logger()
 
     parser = argparse.ArgumentParser(
         description="VFS Malta Slot Checker: reports earliest appointment slots."
@@ -48,21 +50,58 @@ def main() -> None:
         logging.exception(e)
 
 
+def resolve_log_level() -> int:
+    """
+    Resolves the logging level from (in priority order) the LOG_LEVEL env var,
+    then [logging] level in config, defaulting to INFO. Accepts level names
+    (DEBUG, INFO, WARNING, ERROR) case-insensitively.
+    """
+    raw = os.environ.get("LOG_LEVEL") or get_config_value("logging", "level", "INFO")
+    level = logging.getLevelName(str(raw).strip().upper())
+    # getLevelName returns an int for known names, else the string back.
+    return level if isinstance(level, int) else logging.INFO
+
+
+def resolve_browser_activity_logging() -> bool:
+    """
+    Whether to attach Playwright page hooks that log navigations, network
+    requests/responses, console messages and page errors. Controlled by the
+    BROWSER_ACTIVITY_LOG env var or [logging] browser_activity in config.
+    """
+    raw = (
+        os.environ.get("BROWSER_ACTIVITY_LOG")
+        or get_config_value("logging", "browser_activity", "False")
+    )
+    return str(raw).strip().lower() in ("1", "true", "yes", "on")
+
+
 def initialize_logger():
-    file_handler = logging.FileHandler("app.log", mode="a")
-    file_handler.setFormatter(
-        logging.Formatter(
-            "[%(asctime)s] %(levelname)s [%(filename)s:%(lineno)d] %(message)s"
-        )
+    level = resolve_log_level()
+
+    # A detailed format with timestamps, level and source line for both sinks so
+    # the file log and console show the same information.
+    detailed_fmt = logging.Formatter(
+        "[%(asctime)s] %(levelname)s [%(filename)s:%(lineno)d] %(message)s"
     )
 
+    file_handler = logging.FileHandler("app.log", mode="a", encoding="utf-8")
+    file_handler.setFormatter(detailed_fmt)
+
+    # Reconfigure stdout to UTF-8 so non-ASCII (page console output, URLs with
+    # unicode, etc.) can't crash the console handler on Windows (cp1252).
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError):
+        pass  # older Python / non-reconfigurable stream — best effort
     stream_handler = logging.StreamHandler(sys.stdout)
-    stream_handler.setFormatter(logging.Formatter("[%(asctime)s] %(message)s"))
+    stream_handler.setFormatter(detailed_fmt)
+
     logging.basicConfig(
-        level=logging.INFO,
+        level=level,
         format="[%(asctime)s] %(levelname)s [%(filename)s:%(lineno)d] %(message)s",
         handlers=[file_handler, stream_handler],
     )
+    logging.info(f"Logging initialized at level {logging.getLevelName(level)}.")
 
 
 if __name__ == "__main__":

@@ -9,6 +9,19 @@ from playwright_stealth import stealth_sync
 from src.utils.config_reader import get_config_value
 from src.utils.route_schema import get_route_schema
 
+
+def _browser_activity_enabled() -> bool:
+    """
+    Whether to attach verbose Playwright page hooks (navigations, network
+    requests/responses, console messages, page errors). Controlled by the
+    BROWSER_ACTIVITY_LOG env var or [logging] browser_activity in config.
+    """
+    raw = (
+        os.environ.get("BROWSER_ACTIVITY_LOG")
+        or get_config_value("logging", "browser_activity", "False")
+    )
+    return str(raw).strip().lower() in ("1", "true", "yes", "on")
+
 SCREENSHOT_DIR = "screenshots"
 
 # When False, the per-step `_take_screenshot` calls are no-ops; only the single
@@ -79,6 +92,7 @@ class VfsBot(ABC):
 
         with sync_playwright() as p:
             cdp_url = get_config_value("browser", "cdp_url")
+            reused_existing_page = False
             if cdp_url:
                 # Attach to an existing Chrome launched with --remote-debugging-port
                 # (useful locally to watch / get past Cloudflare on a real profile).
@@ -87,7 +101,23 @@ class VfsBot(ABC):
                 context = (
                     browser.contexts[0] if browser.contexts else browser.new_context()
                 )
-                page = context.new_page()
+                # Prefer an existing tab already on the VFS site — when attaching
+                # via CDP the whole point is to reuse a tab you loaded PAST the
+                # anti-bot spinner manually, not to open a fresh one that hits it
+                # again. Fall back to a new tab only if no VFS tab is open.
+                page = None
+                for existing in context.pages:
+                    try:
+                        if "vfsglobal.com" in (existing.url or ""):
+                            page = existing
+                            reused_existing_page = True
+                            logging.info(f"Reusing existing VFS tab: {existing.url}")
+                            break
+                    except Exception:
+                        continue
+                if page is None:
+                    page = context.new_page()
+                    logging.info("No existing VFS tab found — opened a new tab.")
             else:
                 # Launch our own browser (the prod path — headless on a server).
                 is_headless = headless_mode in ("True", "true")
@@ -106,8 +136,19 @@ class VfsBot(ABC):
                 page = context.new_page()
                 stealth_sync(page)
 
-            logging.info(f"Navigating to {vfs_url}")
-            page.goto(vfs_url, timeout=60000, wait_until="domcontentloaded")
+            VfsBot._attach_activity_logging(page)
+
+            if reused_existing_page:
+                # The tab is already on VFS (loaded past the spinner manually);
+                # don't reload it — just bring it to front and proceed.
+                logging.info(f"Using already-loaded page: {page.url}")
+                try:
+                    page.bring_to_front()
+                except Exception:
+                    pass
+            else:
+                logging.info(f"Navigating to {vfs_url}")
+                page.goto(vfs_url, timeout=60000, wait_until="domcontentloaded")
 
             self.pre_login_steps(page)
 
@@ -150,18 +191,23 @@ class VfsBot(ABC):
         email_input = page.locator(USERNAME_SELECTOR).first
         password_input = page.locator(PASSWORD_SELECTOR).first
 
+        logging.info("Filling email field...")
         email_input.click()
         page.wait_for_timeout(800)
         email_input.press_sequentially(email_id, delay=200)
         page.wait_for_timeout(1200)
+        logging.info("Email entered; filling password field...")
 
         password_input.click()
         page.wait_for_timeout(800)
         password_input.press_sequentially(password, delay=200)
         page.wait_for_timeout(1500)
+        logging.info("Password entered; about to click Sign In...")
+        VfsBot._take_final_screenshot(page, "before_signin")
 
         page.get_by_role("button", name="Sign In").click()
         logging.info("Clicked Sign In")
+        VfsBot._take_final_screenshot(page, "after_signin")
         # A Cloudflare captcha dialog often appears right after Sign In and blocks
         # the redirect to the dashboard, so watch for it during this wait.
         VfsBot._wait_with_captcha_check(page, 6000)
@@ -500,6 +546,56 @@ class VfsBot(ABC):
             logging.warning(f"Could not select '{value}' for '{control_name}': {e}")
             VfsBot._take_screenshot(page, "ERROR_dropdown")
             return False
+
+    # ------------------------------------------------------------------ #
+    # Browser activity logging                                           #
+    # ------------------------------------------------------------------ #
+
+    @staticmethod
+    def _attach_activity_logging(page) -> None:
+        """
+        Attaches verbose Playwright event listeners to `page` so that browser
+        activity — frame navigations, network requests/responses, console
+        messages and page/request errors — is logged at DEBUG level.
+
+        No-op unless browser-activity logging is enabled (BROWSER_ACTIVITY_LOG
+        env var or [logging] browser_activity in config). The network listeners
+        are intentionally chatty, so they log at DEBUG: set the log level to
+        DEBUG to actually see them.
+        """
+        if not _browser_activity_enabled():
+            return
+
+        log = logging.getLogger("browser")
+        log.info("Browser-activity logging enabled (navigations, network, console).")
+
+        def on_request(request):
+            log.debug(f">> {request.method} {request.url}")
+
+        def on_response(response):
+            log.debug(f"<< {response.status} {response.url}")
+
+        def on_request_failed(request):
+            failure = getattr(request, "failure", None)
+            log.warning(f"XX request failed: {request.method} {request.url} ({failure})")
+
+        def on_console(msg):
+            log.debug(f"[console:{msg.type}] {msg.text}")
+
+        def on_page_error(error):
+            log.warning(f"[page error] {error}")
+
+        def on_frame_navigated(frame):
+            # Only the main frame's navigations are interesting; iframes are noisy.
+            if frame == page.main_frame:
+                log.info(f"Navigated: {frame.url}")
+
+        page.on("request", on_request)
+        page.on("response", on_response)
+        page.on("requestfailed", on_request_failed)
+        page.on("console", on_console)
+        page.on("pageerror", on_page_error)
+        page.on("framenavigated", on_frame_navigated)
 
     # ------------------------------------------------------------------ #
     # Screenshots                                                        #
