@@ -62,3 +62,16 @@ def get_config_value(section: str, key: str, default: str = None) -> str:
         return _config[section][key]
     else:
         return default
+
+
+def set_config_value(section: str, key: str, value: str) -> None:
+    """
+    Sets a configuration value at runtime (in the in-memory config only).
+
+    Used by the supervisor to point the bot at the Chrome it just launched —
+    e.g. set_config_value("browser", "cdp_url", "http://127.0.0.1:9222") — so the
+    bot attaches to the supervisor-owned browser without editing any files.
+    """
+    if not _config.has_section(section):
+        _config.add_section(section)
+    _config[section][key] = value

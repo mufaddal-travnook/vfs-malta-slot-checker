@@ -96,6 +96,63 @@ Or via **cron** (Linux), every 30 minutes:
 Output goes to stdout and `app.log`. The Telegram report is sent at the end of
 each run.
 
+## Production: self-healing hourly runs on EC2
+
+VFS sits behind Cloudflare, which blocks headless/automation browsers (a plain
+headless run gets a 403 or hangs on the spinner). So in production the bot drives
+a **real, headed Chrome** over CDP, running under a **virtual display (Xvfb)** so
+"headed" works on a server with no monitor.
+
+The **supervisor** ([`src/supervisor.py`](src/supervisor.py)) makes each hourly run
+self-healing:
+
+- Launches a fresh Chrome that it **owns**, runs the full flow, and **kills Chrome
+  on the way out — success or failure** (no zombie Chrome processes accumulating
+  across hourly runs).
+- Retries the whole flow with a brand-new browser on any failure — Cloudflare not
+  passed / **Sign In stayed disabled** / page closed / dashboard not reached / CDP
+  connect failure — up to **4 attempts** with a 15s backoff.
+- If all attempts fail, sends a **Telegram alert** so you know that hour needs
+  attention, and exits non-zero.
+
+### One-time setup on the box
+
+```bash
+sudo apt update
+sudo apt install -y xvfb google-chrome-stable    # or: chromium
+git clone <your-repo> /opt/vfs-malta-slot-checker
+cd /opt/vfs-malta-slot-checker
+python3 -m venv .venv && . .venv/bin/activate
+pip install -r requirements.txt
+python -m playwright install chromium             # Playwright client deps
+
+# Put your real credentials in a gitignored local override:
+cp config/config.local.ini.example config/config.local.ini  # if present, else create it
+$EDITOR config/config.local.ini                   # [vfs-credential], [telegram]
+```
+
+Set `[browser] headless = false` (we run headed under Xvfb). Chrome is found
+automatically; pin it with the `CHROME_PATH` env var if needed.
+
+### Run it (one command)
+
+```bash
+./run_ec2.sh                  # one self-healing run (AE -> MT)
+```
+
+[`run_ec2.sh`](run_ec2.sh) wraps the supervisor with `flock` (a lockfile so
+overlapping runs can't pile up) and `xvfb-run -a` (a fresh virtual display per
+run, torn down after).
+
+### Schedule hourly (cron)
+
+```cron
+0 * * * * /opt/vfs-malta-slot-checker/run_ec2.sh >> /opt/vfs-malta-slot-checker/app.log 2>&1
+```
+
+That's it — each hour spins up a clean browser, checks the slots, reports via
+Telegram, cleans up, and retries/alerts on failure on its own.
+
 ## Notes / gotchas
 
 - **Captcha:** the portal shows a Cloudflare *Verify Captcha* dialog that usually

@@ -41,6 +41,38 @@ class LoginError(Exception):
     """Exception raised when login fails."""
 
 
+class RetryableError(Exception):
+    """
+    Base for failures the supervisor should retry by relaunching a fresh browser.
+
+    The hourly EC2 run treats every failure mode below as "tear down Chrome and
+    try the whole flow again", since a fresh browser is the most reliable way to
+    get a clean Cloudflare pass / recover from a dead page.
+    """
+
+
+class CdpConnectError(RetryableError):
+    """Could not connect to Chrome over CDP (Chrome not up / port not ready)."""
+
+
+class LoginFormNotReadyError(RetryableError):
+    """The login form never appeared (Cloudflare spinner / 403 / slow load)."""
+
+
+class SignInDisabledError(RetryableError):
+    """The Sign In button stayed disabled — Cloudflare 'Verify you are human'
+    was not passed, so login can't proceed."""
+
+
+class DashboardNotReachedError(RetryableError):
+    """Sign In was clicked but the dashboard never loaded (bad creds, captcha,
+    or a slow/blocked redirect)."""
+
+
+class SlotCheckError(RetryableError):
+    """Reached the appointment step but couldn't complete the slot check."""
+
+
 class VfsBot(ABC):
     """
     Slot-check bot for the VFS Malta portal.
@@ -59,11 +91,20 @@ class VfsBot(ABC):
 
     def run(self) -> bool:
         """
-        Connects to / launches a browser, navigates to the VFS login URL, logs
-        in, starts a new booking and runs the slot-check flow.
+        Connects to a browser over CDP, navigates to the VFS login URL, logs in,
+        starts a new booking and runs the slot-check flow.
+
+        On the EC2/supervisor path, Chrome is launched and killed by the
+        supervisor (see src/supervisor.py); this method only attaches to it.
 
         Returns:
-            bool: Always False (no appointment is booked, by design).
+            bool: True if the slot check completed and a report was produced.
+
+        Raises:
+            RetryableError (and subclasses): on any failure the supervisor should
+            retry with a fresh browser — CDP connect failure, login form never
+            ready, Sign In disabled (Cloudflare), dashboard not reached, or a
+            slot-check failure.
         """
         logging.info(
             f"Starting VFS Slot Checker for "
@@ -94,10 +135,16 @@ class VfsBot(ABC):
             cdp_url = get_config_value("browser", "cdp_url")
             reused_existing_page = False
             if cdp_url:
-                # Attach to an existing Chrome launched with --remote-debugging-port
-                # (useful locally to watch / get past Cloudflare on a real profile).
+                # Attach to an existing Chrome launched with --remote-debugging-port.
+                # On EC2 the supervisor launches/kills that Chrome; locally you run
+                # run.ps1. Either way we only attach here.
                 logging.info(f"Connecting to Chrome via CDP: {cdp_url}")
-                browser = p.chromium.connect_over_cdp(cdp_url)
+                try:
+                    browser = p.chromium.connect_over_cdp(cdp_url)
+                except Exception as e:
+                    raise CdpConnectError(
+                        f"Could not connect to Chrome at {cdp_url}: {e}"
+                    ) from e
                 context = (
                     browser.contexts[0] if browser.contexts else browser.new_context()
                 )
@@ -154,17 +201,21 @@ class VfsBot(ABC):
 
             try:
                 self.login(page, email_id, password)
-                logging.info("Slot check complete.")
+            except RetryableError:
+                # A classified, expected failure — screenshot the end state and
+                # let it bubble up so the supervisor retries with a fresh browser.
+                self._take_final_screenshot(page, "final")
+                raise
             except Exception as e:
-                logging.error(f"Slot-check error details: {e}")
+                # Anything unclassified (incl. Playwright TargetClosedError when
+                # the page/browser died mid-flow) is also retryable.
+                self._take_final_screenshot(page, "final")
+                raise RetryableError(f"Unexpected flow error: {e}") from e
 
-            # Single final screenshot capturing wherever the flow ended up.
+            # Single final screenshot capturing the successful end state.
             self._take_final_screenshot(page, "final")
-
-            # When attached via CDP we leave the page open; an own-launched browser
-            # is closed by the sync_playwright context manager on exit.
-            logging.info("Run finished.")
-            return False
+            logging.info("Slot check complete. Run finished.")
+            return True
 
     # ------------------------------------------------------------------ #
     # Flow steps                                                          #
@@ -185,7 +236,13 @@ class VfsBot(ABC):
         Start New Booking and runs the slot check.
         """
         # Wait for login form to be ready (VFS can take a while behind Cloudflare).
-        page.wait_for_selector(USERNAME_SELECTOR, timeout=120000)
+        try:
+            page.wait_for_selector(USERNAME_SELECTOR, timeout=120000)
+        except Exception as e:
+            raise LoginFormNotReadyError(
+                "Login form never appeared within 120s (Cloudflare spinner / 403 / "
+                f"slow load): {e}"
+            ) from e
         logging.info("Login form loaded")
 
         email_input = page.locator(USERNAME_SELECTOR).first
@@ -205,7 +262,25 @@ class VfsBot(ABC):
         logging.info("Password entered; about to click Sign In...")
         VfsBot._take_final_screenshot(page, "before_signin")
 
-        page.get_by_role("button", name="Sign In").click()
+        sign_in = page.get_by_role("button", name="Sign In").first
+        # If the Sign In button is still disabled, the Cloudflare 'Verify you are
+        # human' challenge was not passed — there's no point typing/clicking
+        # further. Signal a retry so the supervisor relaunches a fresh browser
+        # (which usually gets a clean Cloudflare pass).
+        try:
+            sign_in.wait_for(state="visible", timeout=10000)
+        except Exception as e:
+            raise SignInDisabledError(f"Sign In button not visible: {e}") from e
+        if not sign_in.is_enabled():
+            # Give Cloudflare a brief moment in case it's about to enable it.
+            page.wait_for_timeout(3000)
+        if not sign_in.is_enabled():
+            raise SignInDisabledError(
+                "Sign In stayed disabled — Cloudflare 'Verify you are human' "
+                "was not passed."
+            )
+
+        sign_in.click()
         logging.info("Clicked Sign In")
         VfsBot._take_final_screenshot(page, "after_signin")
         # A Cloudflare captcha dialog often appears right after Sign In and blocks
@@ -214,12 +289,15 @@ class VfsBot(ABC):
 
         try:
             page.wait_for_url("**/dashboard", timeout=60000)
-            logging.info(f"Reached dashboard: {page.url}")
-            page.wait_for_timeout(2000)
-            self._start_new_booking(page)
-            self._check_slots(page)
         except Exception as e:
-            logging.warning(f"Did not reach /dashboard: {e}")
+            raise DashboardNotReachedError(
+                f"Did not reach /dashboard after Sign In (current URL: {page.url}): {e}"
+            ) from e
+
+        logging.info(f"Reached dashboard: {page.url}")
+        page.wait_for_timeout(2000)
+        self._start_new_booking(page)
+        self._check_slots(page)
 
     @staticmethod
     def _start_new_booking(page) -> None:
@@ -263,9 +341,10 @@ class VfsBot(ABC):
 
         try:
             page.wait_for_url("**/application-detail", timeout=30000)
-        except Exception:
-            logging.warning("Did not reach the Appointment Details page; cannot check slots.")
-            return
+        except Exception as e:
+            raise SlotCheckError(
+                f"Did not reach the Appointment Details page; cannot check slots: {e}"
+            ) from e
 
         VfsBot._wait_for_loader(page)
         page.wait_for_timeout(1000)
