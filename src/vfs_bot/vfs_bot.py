@@ -208,13 +208,36 @@ class VfsBot(ABC):
     # ------------------------------------------------------------------ #
 
     def pre_login_steps(self, page) -> None:
-        """Dismiss the cookie consent banner if VFS presents one."""
-        policies_reject_button = page.get_by_role("button", name="Reject All")
+        """
+        Dismiss the OneTrust cookie consent banner if present.
+
+        The banner overlays the bottom of the page and intercepts pointer/focus
+        events, so it must be cleared before we touch the login fields (otherwise
+        focus()/click() on the email field hangs). VFS shows different buttons
+        ('Accept Cookies', 'Reject All', or a close 'X'), so try them in order.
+        """
+        labels = ["Accept Cookies", "Accept All", "Reject All", "Accept", "Close"]
+        for label in labels:
+            try:
+                btn = page.get_by_role("button", name=label).first
+                if btn.count() > 0 and btn.is_visible():
+                    btn.click(timeout=4000)
+                    logging.info(f"Dismissed cookie banner via '{label}'.")
+                    page.wait_for_timeout(800)
+                    return
+            except Exception:
+                continue
+        # Fallback: OneTrust's accept button by its stable id.
         try:
-            policies_reject_button.click(timeout=5000)
-            logging.debug("Rejected all cookie policies")
+            ot = page.locator("#onetrust-accept-btn-handler").first
+            if ot.count() > 0 and ot.is_visible():
+                ot.click(timeout=4000)
+                logging.info("Dismissed cookie banner via OneTrust accept id.")
+                page.wait_for_timeout(800)
+                return
         except Exception:
-            logging.debug("No cookie policy button found, skipping")
+            pass
+        logging.debug("No cookie banner found, skipping")
 
     # Cookie domains to PRESERVE across runs — Cloudflare's clearance lives here.
     # Everything else on the VFS domains (the login/auth session) is cleared so
@@ -260,6 +283,75 @@ class VfsBot(ABC):
         except Exception as e:
             logging.warning(f"Failed to selectively clear cookies: {e}")
 
+    @staticmethod
+    def _wait_for_signin_enabled(page, sign_in, timeout_ms: int = 60000) -> bool:
+        """
+        Polls until the Sign In button becomes enabled (Cloudflare Turnstile
+        auto-solved) or the timeout elapses.
+
+        Logs progress periodically and reports when the Turnstile token appears,
+        so a stuck challenge is visible in the logs rather than a silent wait.
+        Returns True if Sign In became enabled.
+        """
+        step_ms = 2000
+        waited = 0
+        token_seen = False
+        while waited < timeout_ms:
+            try:
+                if sign_in.is_enabled():
+                    logging.info(f"Sign In enabled after {waited/1000:.0f}s.")
+                    return True
+            except Exception:
+                pass
+
+            # Surface when the Turnstile token populates (challenge solved) even
+            # if the button takes another moment to flip enabled.
+            if not token_seen:
+                try:
+                    val = page.evaluate(
+                        "() => { const i = document.querySelector(\"input[name='cf-turnstile-response']\");"
+                        " return i ? i.value : ''; }"
+                    )
+                    if val:
+                        token_seen = True
+                        logging.info("Turnstile token populated (challenge passed).")
+                except Exception:
+                    pass
+
+            page.wait_for_timeout(step_ms)
+            waited += step_ms
+            if waited % 10000 == 0:
+                logging.info(f"Waiting for Cloudflare to enable Sign In... ({waited/1000:.0f}s)")
+        return False
+
+    @staticmethod
+    def _fill_field(page, locator, value: str) -> None:
+        """
+        Sets an input's value robustly, immune to overlays and Xvfb hangs.
+
+        Tries Playwright fill() first (bounded timeout). If that's blocked (an
+        overlay intercepting actionability), falls back to setting the value via
+        JS and dispatching the 'input'/'change' events Angular listens for, so
+        the form model updates even without a real focus/click.
+        """
+        try:
+            locator.fill(value, timeout=8000)
+            return
+        except Exception as e:
+            logging.info(f"fill() blocked ({e}); using JS value-set fallback.")
+        try:
+            locator.evaluate(
+                """(el, val) => {
+                    el.value = val;
+                    el.dispatchEvent(new Event('input', { bubbles: true }));
+                    el.dispatchEvent(new Event('change', { bubbles: true }));
+                    el.dispatchEvent(new Event('blur', { bubbles: true }));
+                }""",
+                value,
+            )
+        except Exception as e:
+            raise RetryableError(f"Could not fill a login field: {e}") from e
+
     def login(self, page, email_id: str, password: str) -> None:
         """
         Fills the login form, signs in, and — once on the dashboard — clicks
@@ -278,23 +370,22 @@ class VfsBot(ABC):
         email_input = page.locator(USERNAME_SELECTOR).first
         password_input = page.locator(PASSWORD_SELECTOR).first
 
-        # Use focus()+type instead of click()+press_sequentially: a real mouse
-        # click does a pointer hit-test that an overlay (Cloudflare Turnstile
-        # iframe, cookie banner) can intercept, causing click() to hang — which
-        # is exactly what happens under Xvfb on the server. focus() bypasses the
-        # hit-test, and type() still sends per-character key events for a
-        # human-like cadence.
+        # The cookie banner often appears only after the form renders — dismiss
+        # it again here so it isn't overlaying the fields when we focus them.
+        self.pre_login_steps(page)
+
+        # Fill via JS value-set + input event rather than focus()/type(): under
+        # Xvfb, focus() does an actionability wait that an overlay can block,
+        # hanging for 30s. Setting the value directly and dispatching 'input'
+        # makes Angular pick it up without any pointer/focus hit-test. We bound
+        # every interaction with a short timeout so nothing can hang the run.
         logging.info("Filling email field...")
-        email_input.focus()
+        VfsBot._fill_field(page, email_input, email_id)
         page.wait_for_timeout(500)
-        email_input.type(email_id, delay=120)
-        page.wait_for_timeout(800)
         logging.info("Email entered; filling password field...")
 
-        password_input.focus()
-        page.wait_for_timeout(500)
-        password_input.type(password, delay=120)
-        page.wait_for_timeout(1000)
+        VfsBot._fill_field(page, password_input, password)
+        page.wait_for_timeout(800)
         logging.info("Password entered; about to click Sign In...")
         VfsBot._take_final_screenshot(page, "before_signin")
 
@@ -307,13 +398,17 @@ class VfsBot(ABC):
             sign_in.wait_for(state="visible", timeout=10000)
         except Exception as e:
             raise SignInDisabledError(f"Sign In button not visible: {e}") from e
-        if not sign_in.is_enabled():
-            # Give Cloudflare a brief moment in case it's about to enable it.
-            page.wait_for_timeout(3000)
-        if not sign_in.is_enabled():
+
+        # Wait for the Cloudflare Turnstile to auto-solve. The 'Verify you are
+        # human' widget runs a background check and only then enables Sign In
+        # (and populates the cf-turnstile-response token). On a trusted/real
+        # Chrome this clears on its own within a few-to-tens of seconds, so we
+        # poll up to ~60s rather than giving up after 3s. If it never enables,
+        # raise so the supervisor retries with a fresh browser.
+        if not VfsBot._wait_for_signin_enabled(page, sign_in, timeout_ms=60000):
             raise SignInDisabledError(
-                "Sign In stayed disabled — Cloudflare 'Verify you are human' "
-                "was not passed."
+                "Sign In stayed disabled after 60s — Cloudflare 'Verify you are "
+                "human' did not auto-solve."
             )
 
         try:
