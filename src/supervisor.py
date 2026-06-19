@@ -1,19 +1,23 @@
-"""Self-healing supervisor for the VFS Malta slot checker (EC2 / hourly cron).
+"""Self-healing supervisor for the VFS slot checker (EC2 / hourly cron).
 
-Each invocation is ONE hourly run. The supervisor:
+One invocation runs the slot check for EVERY route listed in [vfs-url] (one
+cron => all URLs). For each route, in order, the supervisor:
 
-  1. Launches a fresh, real Chrome (CDP) that IT owns.
+  1. Launches a fresh, real Chrome (CDP) that IT owns — a NEW Chrome per route.
   2. Points the bot at that Chrome and runs the full slot-check flow.
   3. KILLS Chrome on the way out — success or failure — so no zombie processes
-     accumulate across hourly runs.
+     accumulate (and the next route always starts clean).
   4. On a retryable failure (Cloudflare not passed / Sign In disabled / page
      closed / dashboard not reached / CDP connect failure / any unexpected
      error), it tears everything down and tries again with a brand-new browser,
      up to MAX_ATTEMPTS times with a short backoff.
-  5. If every attempt fails, it sends a Telegram alert so you know that hour
-     needs attention, and exits non-zero.
+  5. Sends that route's slot report to Telegram (done by the bot), and a Telegram
+     alert if all its attempts fail. One route failing does not stop the others.
 
-Run directly:   python -m src.supervisor
+So a single cron tick produces: url1 -> msg, url2 -> msg, url3 -> msg ...
+
+Run directly:   python -m src.supervisor          # all routes
+                python -m src.supervisor -sc AE -dc MT   # one route only
 On EC2 it's invoked under xvfb-run by run_ec2.sh (see that script).
 """
 
@@ -26,6 +30,7 @@ from src.main import initialize_logger
 from src.utils import telegram
 from src.utils.chrome_launcher import ChromeProcess
 from src.utils.config_reader import (
+    get_config_section,
     get_config_value,
     initialize_config,
     set_config_value,
@@ -102,6 +107,63 @@ def run(source: str = "AE", dest: str = "MT") -> bool:
     return False
 
 
+def _all_routes() -> list:
+    """
+    Returns every route configured in [vfs-url] as (source, dest) tuples.
+
+    Each key in the section is a '<SOURCE>-<DEST>' route (e.g. 'AE-MT'), so we
+    just split the keys. Order follows the config file.
+    """
+    section = get_config_section("vfs-url")
+    routes = []
+    for key in section:
+        parts = key.upper().split("-")
+        if len(parts) == 2 and parts[0] and parts[1]:
+            routes.append((parts[0], parts[1]))
+        else:
+            logging.warning(f"Skipping malformed [vfs-url] key '{key}' (want SRC-DEST).")
+    return routes
+
+
+def run_all_routes() -> bool:
+    """
+    Runs the slot check for EVERY route in [vfs-url], one after another.
+
+    Each route gets its OWN fresh Chrome (launched and killed per attempt inside
+    run() -> run_once_with_fresh_browser), and its own Telegram report is sent by
+    the bot at the end of its run. One route failing does NOT stop the others —
+    each is independent, with its own retries and its own failure alert.
+
+    Returns True only if ALL routes succeeded.
+    """
+    routes = _all_routes()
+    if not routes:
+        logging.error("No routes configured in [vfs-url] — nothing to run.")
+        return False
+
+    logging.info(
+        f"Running {len(routes)} route(s): "
+        + ", ".join(f"{s}-{d}" for s, d in routes)
+    )
+
+    all_ok = True
+    for idx, (source, dest) in enumerate(routes, start=1):
+        logging.info(f"########## Route {idx}/{len(routes)}: {source}-{dest} ##########")
+        try:
+            # A fresh Chrome is opened and closed for this route inside run().
+            ok = run(source, dest)
+        except Exception as e:
+            # run() handles its own errors, but guard so one route can never
+            # abort the whole loop.
+            logging.exception(f"Route {source}-{dest} crashed unexpectedly: {e}")
+            ok = False
+        all_ok = all_ok and ok
+        logging.info(f"Route {source}-{dest} {'succeeded' if ok else 'FAILED'}.")
+
+    logging.info(f"All routes done. Overall {'OK' if all_ok else 'with failures'}.")
+    return all_ok
+
+
 def _alert_failure(source: str, dest: str, error: str, attempts: int) -> None:
     """Sends a Telegram alert that the hourly run failed (best-effort)."""
     msg = (
@@ -117,16 +179,27 @@ def _alert_failure(source: str, dest: str, error: str, attempts: int) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Self-healing supervisor for the VFS Malta slot checker."
+        description="Self-healing supervisor for the VFS slot checker."
     )
-    parser.add_argument("-sc", "--source-country-code", default="AE")
-    parser.add_argument("-dc", "--destination-country-code", default="MT")
+    # By default, run EVERY route in [vfs-url], each in its own fresh Chrome,
+    # pushing a Telegram report per route. Pass -sc/-dc to run just one route.
+    parser.add_argument(
+        "-sc", "--source-country-code", default=None,
+        help="Run only this source country (with -dc). Omit to run all routes.",
+    )
+    parser.add_argument(
+        "-dc", "--destination-country-code", default=None,
+        help="Run only this destination country (with -sc). Omit to run all routes.",
+    )
     args = parser.parse_args()
 
     initialize_config()
     initialize_logger()
 
-    ok = run(args.source_country_code, args.destination_country_code)
+    if args.source_country_code and args.destination_country_code:
+        ok = run(args.source_country_code, args.destination_country_code)
+    else:
+        ok = run_all_routes()
     sys.exit(0 if ok else 1)
 
 

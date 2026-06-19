@@ -115,6 +115,31 @@ self-healing:
 - If all attempts fail, sends a **Telegram alert** so you know that hour needs
   attention, and exits non-zero.
 
+### Multiple routes in one run
+
+One supervisor run checks **every route listed in
+[`config/vfs_urls.ini`](config/vfs_urls.ini)** `[vfs-url]`, in order — so a single
+hourly cron covers all your URLs:
+
+```
+cron tick
+  AE-MT  ->  fresh Chrome  ->  slot check  ->  Telegram message
+  AE-LU  ->  fresh Chrome  ->  slot check  ->  Telegram message
+  IN-MT  ->  fresh Chrome  ->  slot check  ->  Telegram message
+```
+
+Each route opens its **own fresh Chrome** (launched and killed per route), gets its
+**own Telegram report**, and its own retries. **One route failing does not stop the
+others.** Add a route by adding a `SRC-DEST = <login-url>` line under `[vfs-url]`
+and a matching `config/routes/SRC-DEST.json` describing its combinations.
+
+Run all routes (default) or just one:
+
+```bash
+python -m src.supervisor                 # every route in [vfs-url]
+python -m src.supervisor -sc AE -dc MT   # only AE -> MT
+```
+
 ### One-time setup on the box
 
 ```bash
