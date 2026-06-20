@@ -1,0 +1,16 @@
+{
+  "description": "UAE -> Switzerland. SLOT-CHECK ONLY: reach Step 1 (Appointment Details), then for each centre/category combination read the 'Earliest available slot' banner and report all results via Telegram. No booking is made.",
+  "mode": "slot-check",
+  "slot_check": {
+    "combinations": [
+      { "label": "Abu Dhabi - Business Visa",
+        "centre": "Abu Dhabi", "category": "Business Visa", "sub_category": "" },
+      { "label": "Abu Dhabi - SCHENGEN",
+        "centre": "Abu Dhabi", "category": "SCHENGEN", "sub_category": "" },
+      { "label": "Dubai - Business Visa",
+        "centre": "Dubai", "category": "Business Visa", "sub_category": "" },
+      { "label": "Dubai - SCHENGEN",
+        "centre": "Dubai", "category": "SCHENGEN", "sub_category": "" }
+    ]
+  }
+}
