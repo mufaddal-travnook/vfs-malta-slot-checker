@@ -74,6 +74,7 @@ src/
     route_schema.py        # loads config/routes/<SRC>-<DST>.json
     chrome_launcher.py     # launches/owns/kills a real Chrome (CDP), cross-platform
     telegram.py            # sends reports via the Telegram Bot API
+    telegram_message.py    # EDITABLE message templates (route-aware: flag, link)
   vfs_bot/
     vfs_bot.py             # the flow: login → Turnstile → Step 1 → read slots
     vfs_bot_factory.py     # builds the schema-driven bot for a route
@@ -192,6 +193,38 @@ route file, that route runs but reports nothing (logged, not a crash).
 > `selectedSubvisaCategory`, `visaCategoryCode`), which are the **same on every
 > VFS portal** — only the option *text* differs, which is why no code changes are
 > needed per portal.
+
+---
+
+## Customizing the Telegram message
+
+All message wording lives in **one editable file**:
+[`src/utils/telegram_message.py`](src/utils/telegram_message.py). Edit it to change
+the layout — the bot logic never touches the formatting.
+
+Each route sends its own **route-aware** message: the destination's flag, each
+combination's label + the raw "Earliest available slot" text, and a clickable link
+to that portal's login page (pulled from `config/vfs_urls.ini`). Example:
+
+```
+🇩🇰 Dubai - Denmark - Tourism:
+  Earliest available slot for 1 Applicants is : 24-06-2026
+
+Link to visa center site (https://visa.vfsglobal.com/are/en/dnk/login)
+```
+
+When you add a new route, add its flag to `DESTINATION_FLAGS` in that file:
+
+```python
+DESTINATION_FLAGS = {
+    "MT": "🇲🇹", "LUX": "🇱🇺", "CHE": "🇨🇭", "DNK": "🇩🇰",
+    "FRA": "🇫🇷",   # <- new route
+}
+```
+
+If you forget, the message simply omits the flag (still correct — it never
+mislabels). Functions in the file: `slot_report(...)` (the slot message) and
+`failure_alert(...)` (the failure message).
 
 ---
 

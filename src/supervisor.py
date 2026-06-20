@@ -27,7 +27,7 @@ import sys
 import time
 
 from src.main import initialize_logger
-from src.utils import telegram
+from src.utils import telegram, telegram_message
 from src.utils.chrome_launcher import ChromeProcess
 from src.utils.config_reader import (
     get_config_section,
@@ -165,11 +165,12 @@ def run_all_routes() -> bool:
 
 
 def _alert_failure(source: str, dest: str, error: str, attempts: int) -> None:
-    """Sends a Telegram alert that the hourly run failed (best-effort)."""
-    msg = (
-        f"⚠️ VFS slot check FAILED for {source.upper()}→{dest.upper()} "
-        f"after {attempts} attempt(s).\n\nLast error:\n{error}"
-    )
+    """Sends a Telegram alert that the run failed (best-effort).
+
+    Message layout lives in src/utils/telegram_message.py — edit it there.
+    """
+    login_url = _vfs_url(source, dest) or ""
+    msg = telegram_message.failure_alert(source, dest, error, attempts, login_url)
     logging.error(msg)
     if telegram.is_configured():
         telegram.send_message(msg)

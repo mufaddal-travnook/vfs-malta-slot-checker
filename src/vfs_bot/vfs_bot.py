@@ -716,7 +716,7 @@ class VfsBot(ABC):
             VfsBot._take_screenshot(page, f"slot_{len(results)}")
             page.wait_for_timeout(1000)
 
-        VfsBot._send_slot_report(results)
+        self._send_slot_report(results)
 
     @staticmethod
     def _read_slot_message(page, timeout: int = 12000) -> str:
@@ -733,17 +733,22 @@ class VfsBot(ABC):
         except Exception:
             return ""
 
-    @staticmethod
-    def _send_slot_report(results: list) -> None:
-        """Formats the collected (label, message) slot results and sends them to Telegram."""
-        from src.utils import telegram
+    def _send_slot_report(self, results: list) -> None:
+        """Formats this route's slot results and sends them to Telegram.
 
-        lines = ["VFS Malta — Earliest appointment slots", ""]
-        for label, message in results:
-            lines.append(f"• {label}")
-            lines.append(f"  {message}")
-            lines.append("")
-        report = "\n".join(lines).strip()
+        The message layout lives in src/utils/telegram_message.py — edit it there.
+        It is route-aware, so each portal's message shows the correct destination.
+        """
+        from src.utils import telegram, telegram_message
+
+        url_key = f"{self.source_country_code}-{self.destination_country_code}"
+        login_url = get_config_value("vfs-url", url_key, "")
+        report = telegram_message.slot_report(
+            self.source_country_code,
+            self.destination_country_code,
+            results,
+            login_url,
+        )
 
         logging.info("Slot report:\n" + report)
         if telegram.is_configured():
