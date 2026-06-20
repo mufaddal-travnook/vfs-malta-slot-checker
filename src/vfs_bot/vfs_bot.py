@@ -602,16 +602,16 @@ class VfsBot(ABC):
             except Exception as e:
                 raise RetryableError(f"Could not click Sign In: {e}") from e
         VfsBot._take_final_screenshot(page, "after_signin")
-        # A Cloudflare captcha dialog often appears right after Sign In and blocks
-        # the redirect to the dashboard, so watch for it during this wait.
-        VfsBot._wait_with_captcha_check(page, 6000)
 
-        try:
-            page.wait_for_url("**/dashboard", timeout=60000)
-        except Exception as e:
+        # After Sign In, Cloudflare often shows the 'Verify Captcha' dialog
+        # (app-cloudflare-dialog with a Submit button) that BLOCKS the redirect
+        # to the dashboard. It can appear at any moment during this wait, so we
+        # poll: dismiss the dialog if present AND check whether we've landed on
+        # the dashboard, for up to ~90s, instead of a single blind wait_for_url.
+        if not VfsBot._await_dashboard_handling_captcha(page, timeout_ms=90000):
             raise DashboardNotReachedError(
-                f"Did not reach /dashboard after Sign In (current URL: {page.url}): {e}"
-            ) from e
+                f"Did not reach /dashboard after Sign In (current URL: {page.url})."
+            )
 
         logging.info(f"Reached dashboard: {page.url}")
         page.wait_for_timeout(2000)
@@ -860,7 +860,14 @@ class VfsBot(ABC):
             VfsBot._wait_for_turnstile_token(page)
             try:
                 submit = dialog.get_by_role("button", name="Submit").first
-                submit.click(timeout=10000)
+                try:
+                    submit.click(timeout=10000)
+                except Exception:
+                    # Slow EC2 / overlay — force, then JS-dispatch as last resort.
+                    try:
+                        submit.click(force=True, timeout=10000)
+                    except Exception:
+                        submit.evaluate("el => el.click()")
                 logging.info(f"Clicked captcha 'Submit' (attempt {attempt})")
             except Exception as e:
                 logging.warning(f"Could not click captcha 'Submit': {e}")
@@ -885,6 +892,36 @@ class VfsBot(ABC):
             "Captcha dialog still visible after retries — it may need a manual solve."
         )
         VfsBot._take_screenshot(page, "ERROR_captcha_persist")
+
+    @staticmethod
+    def _await_dashboard_handling_captcha(page, timeout_ms: int = 90000) -> bool:
+        """
+        Waits for the dashboard URL while continuously dismissing the Cloudflare
+        'Verify Captcha' dialog, which can pop up at any time during the post-
+        Sign-In redirect and blocks it until its Submit is clicked.
+
+        Returns True as soon as the URL reaches /dashboard, else False on timeout.
+        """
+        step_ms = 2000
+        waited = 0
+        while waited < timeout_ms:
+            # Already there?
+            try:
+                if "/dashboard" in (page.url or ""):
+                    return True
+            except Exception:
+                pass
+            # Clear the captcha dialog if it's blocking the redirect.
+            VfsBot._dismiss_captcha(page)
+            page.wait_for_timeout(step_ms)
+            waited += step_ms
+            if waited % 20000 == 0:
+                logging.info(f"Waiting for dashboard (handling captcha)... ({waited/1000:.0f}s)")
+        # Final check.
+        try:
+            return "/dashboard" in (page.url or "")
+        except Exception:
+            return False
 
     @staticmethod
     def _captcha_visible(page) -> bool:
