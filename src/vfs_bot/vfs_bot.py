@@ -499,7 +499,6 @@ class VfsBot(ABC):
                 f"slow load): {e}"
             ) from e
         logging.info("Login form loaded")
-        VfsBot._write_screenshot(page, "Loginformloaded", fixed_name=True)
 
         # Dismiss the cookie banner (it overlays the form and blocks fields).
         self.pre_login_steps(page)
@@ -583,7 +582,6 @@ class VfsBot(ABC):
         VfsBot._fill_field(page, password_input, password)
         page.wait_for_timeout(800)
         logging.info("Password entered; waiting for Sign In to enable...")
-        VfsBot._take_final_screenshot(page, "before_signin")
 
         # Now that the token exists AND the fields are filled, Sign In should
         # enable. Wait for it (this is the correct point to wait on the button).
