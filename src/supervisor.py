@@ -35,7 +35,7 @@ from src.utils.config_reader import (
     initialize_config,
     set_config_value,
 )
-from src.vfs_bot.vfs_bot import RetryableError
+from src.vfs_bot.vfs_bot import GeoBlockedError, RetryableError
 from src.vfs_bot.vfs_bot_factory import UnsupportedCountryError, get_vfs_bot
 
 # Retry policy. The EC2 box is slow, so individual UI actions occasionally time
@@ -86,6 +86,12 @@ def run(source: str = "AE", dest: str = "MT") -> bool:
             # run() returning False shouldn't normally happen (it raises on
             # failure), but treat it as a failed attempt to be safe.
             last_error = "Flow returned without completing."
+        except GeoBlockedError as e:
+            # Non-retryable: VFS geo-blocked the IP (403203). Retrying uses the
+            # same IP and fails identically — stop now, no further attempts.
+            logging.error(f"Geo-blocked for {source}-{dest}: {e}")
+            _alert_failure(source, dest, f"Geo-blocked (403203): {e}", attempts=attempt)
+            return False
         except UnsupportedCountryError as e:
             # Not retryable — a config problem, not a transient failure.
             logging.error(f"Unsupported route {source}-{dest}: {e}")

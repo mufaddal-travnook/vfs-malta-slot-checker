@@ -79,6 +79,17 @@ class SlotCheckError(RetryableError):
     """Reached the appointment step but couldn't complete the slot check."""
 
 
+class GeoBlockedError(Exception):
+    """
+    VFS returned its 'Permission Issues (403203)' page — the request is blocked
+    because the IP is outside the permitted location (or rate-limited).
+
+    This is NOT a RetryableError on purpose: retrying with a fresh browser uses
+    the SAME IP, so it would fail identically. The supervisor should log it and
+    stop immediately instead of burning attempts.
+    """
+
+
 class VfsBot(ABC):
     """
     Slot-check bot for the VFS Malta portal.
@@ -200,6 +211,10 @@ class VfsBot(ABC):
 
             try:
                 self.login(page, email_id, password)
+            except GeoBlockedError:
+                # Non-retryable: the IP is geo-blocked, a fresh browser won't help.
+                # Let it propagate so the supervisor stops without retrying.
+                raise
             except RetryableError:
                 # A classified, expected failure — screenshot the end state and
                 # let it bubble up so the supervisor retries with a fresh browser.
@@ -916,6 +931,14 @@ class VfsBot(ABC):
                     return True
             except Exception:
                 pass
+            # Stop early if VFS served its 'Permission Issues (403203)' geo-block
+            # page — retrying won't help (same IP), so raise to abort immediately.
+            if VfsBot._is_geo_blocked(page):
+                VfsBot._take_final_screenshot(page, "geo_blocked")
+                raise GeoBlockedError(
+                    "VFS 'Permission Issues (403203)' — IP outside permitted "
+                    "location or rate-limited. Not retrying."
+                )
             # Clear the captcha dialog if it's blocking the redirect.
             VfsBot._dismiss_captcha(page)
             page.wait_for_timeout(step_ms)
@@ -927,6 +950,23 @@ class VfsBot(ABC):
             return "/dashboard" in (page.url or "")
         except Exception:
             return False
+
+    @staticmethod
+    def _is_geo_blocked(page) -> bool:
+        """
+        True if the current page is VFS's 'Permission Issues (403203)' block
+        (shown when the IP is outside the permitted location / rate-limited).
+
+        Detected by page content so it works regardless of URL — looks for the
+        403203 code or the 'Permission Issues' heading.
+        """
+        try:
+            body = (page.evaluate(
+                "() => document.body ? document.body.innerText : ''"
+            ) or "").lower()
+        except Exception:
+            return False
+        return "403203" in body or "permission issues" in body
 
     @staticmethod
     def _captcha_visible(page) -> bool:
