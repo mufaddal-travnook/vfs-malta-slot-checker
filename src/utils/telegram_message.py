@@ -19,10 +19,47 @@ DESTINATION_FLAGS = {
     "HUN": "🇭🇺", "HU": "🇭🇺",       # Hungary
 }
 
+# Destination code -> friendly country name, inserted into each label so the
+# message reads "Abu Dhabi - Hungary - Short Stay - Business". Add an entry when
+# you add a new route (falls back to the raw code if missing).
+DESTINATION_NAMES = {
+    "MT": "Malta", "MLT": "Malta",
+    "LUX": "Luxembourg", "LU": "Luxembourg",
+    "CHE": "Switzerland", "CH": "Switzerland",
+    "DNK": "Denmark", "DK": "Denmark",
+    "HUN": "Hungary", "HU": "Hungary",
+}
+
 
 def _flag(dest_code: str) -> str:
     """Flag emoji for a destination code, or '' if unknown (with no trailing space)."""
     return DESTINATION_FLAGS.get((dest_code or "").upper(), "")
+
+
+def _country(dest_code: str) -> str:
+    """Friendly country name for a destination code, or the raw code if unknown."""
+    return DESTINATION_NAMES.get((dest_code or "").upper(), (dest_code or "").upper())
+
+
+def _label_with_country(label: str, dest_code: str) -> str:
+    """
+    Rewrites a combo label as 'Centre - Country - SubCategory', dropping the
+    middle 'category' segment (e.g. 'Short Stay').
+
+    'Abu Dhabi - Short Stay - Business'  -> 'Abu Dhabi - Hungary - Business'
+    'Dubai - SCHENGEN'                   -> 'Dubai - Hungary - SCHENGEN'
+    'Abu Dhabi'                          -> 'Abu Dhabi - Hungary'
+    """
+    country = _country(dest_code)
+    parts = [p.strip() for p in label.split(" - ") if p.strip()]
+    if len(parts) >= 3:
+        # centre - <category dropped> - sub  ->  centre - country - sub
+        return f"{parts[0]} - {country} - {parts[-1]}"
+    if len(parts) == 2:
+        # centre - sub (no category)  ->  centre - country - sub
+        return f"{parts[0]} - {country} - {parts[1]}"
+    # single part (just a centre)
+    return f"{parts[0]} - {country}" if parts else country
 
 
 def slot_report(source_code: str, dest_code: str, results: list, login_url: str = "") -> str:
@@ -42,7 +79,8 @@ def slot_report(source_code: str, dest_code: str, results: list, login_url: str 
 
     lines = []
     for label, message in results:
-        lines.append(f"{prefix}{label}:")
+        full_label = _label_with_country(label, dest_code)
+        lines.append(f"{prefix}{full_label}:")
         lines.append(f"  {message}")
         lines.append("")
     body = "\n".join(lines).strip()
