@@ -16,6 +16,7 @@ DESTINATION_FLAGS = {
     "LUX": "🇱🇺", "LU": "🇱🇺",       # Luxembourg
     "CHE": "🇨🇭", "CH": "🇨🇭",       # Switzerland
     "DNK": "🇩🇰", "DK": "🇩🇰",       # Denmark
+    "HUN": "🇭🇺", "HU": "🇭🇺",       # Hungary
 }
 
 

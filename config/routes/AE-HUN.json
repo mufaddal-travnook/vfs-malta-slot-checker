@@ -1,0 +1,16 @@
+{
+  "description": "UAE -> Hungary. SLOT-CHECK ONLY: reach Step 1 (Appointment Details), then for each centre/category/sub-category combination read the 'Earliest available slot' banner and report all results via Telegram. No booking is made.",
+  "mode": "slot-check",
+  "slot_check": {
+    "combinations": [
+      { "label": "Abu Dhabi - Short Stay - Business",
+        "centre": "Abu Dhabi", "category": "Short Stay", "sub_category": "Business" },
+      { "label": "Abu Dhabi - Short Stay - Tourist",
+        "centre": "Abu Dhabi", "category": "Short Stay", "sub_category": "Tourist" },
+      { "label": "Dubai - Short Stay - Business",
+        "centre": "Dubai", "category": "Short Stay", "sub_category": "Business" },
+      { "label": "Dubai - Short Stay - Tourist",
+        "centre": "Dubai", "category": "Short Stay", "sub_category": "Tourist" }
+    ]
+  }
+}
