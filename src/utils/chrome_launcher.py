@@ -86,10 +86,12 @@ class ChromeProcess:
         startup_timeout_s: how long to wait for the CDP endpoint to come up.
     """
 
-    def __init__(self, port=9222, url=None, profile_dir=None, startup_timeout_s=30):
+    def __init__(self, port=9222, url=None, profile_dir=None, startup_timeout_s=30,
+                 proxy=None):
         self.port = port
         self.url = url
         self.startup_timeout_s = startup_timeout_s
+        self.proxy = proxy  # e.g. "socks5://127.0.0.1:1080" — routes all traffic
         self._proc = None
 
         # Use a STABLE, persistent profile dir by default. This is deliberate:
@@ -124,6 +126,13 @@ class ChromeProcess:
             "--no-sandbox",
             "--disable-dev-shm-usage",
         ]
+        if self.proxy:
+            # Route ALL of Chrome's traffic through this proxy (e.g. an SSH
+            # reverse tunnel back to your home PC, so VFS sees your residential
+            # IP instead of the EC2 datacenter IP). With socks5:// Chrome also
+            # resolves DNS through the proxy, so the EC2 IP isn't leaked via DNS.
+            args.append(f"--proxy-server={self.proxy}")
+            logging.info(f"Chrome routing through proxy: {self.proxy}")
         if self.url:
             args.append(self.url)
 

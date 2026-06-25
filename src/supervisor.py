@@ -58,7 +58,10 @@ def run_once_with_fresh_browser(source: str, dest: str) -> bool:
     exceptions) on failure — the caller decides whether to retry.
     """
     url = _vfs_url(source, dest)
-    chrome = ChromeProcess(port=CDP_PORT, url=url)
+    # Optional proxy (e.g. an SSH reverse tunnel to your home PC) so VFS sees a
+    # residential IP instead of the EC2 datacenter IP. Off unless configured.
+    proxy = get_config_value("browser", "proxy", "") or None
+    chrome = ChromeProcess(port=CDP_PORT, url=url, proxy=proxy)
     try:
         chrome.start()
         # Point the bot at the Chrome we just launched.
