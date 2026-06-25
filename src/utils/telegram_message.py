@@ -62,9 +62,27 @@ def _label_with_country(label: str, dest_code: str) -> str:
     return f"{parts[0]} - {country}" if parts else country
 
 
+import re
+
+# A combination has a real, actionable slot only if its banner contains a date
+# (e.g. '... is : 11-08-2026'). 'No slot message shown' and 'Could not select ...'
+# have no date, so they are filtered out — we only message about real slots.
+_DATE_RE = re.compile(r"\d{1,2}[-/]\d{1,2}[-/]\d{2,4}")
+
+
+def _has_slot(message: str) -> bool:
+    """True if a combination's banner text contains an actual slot date."""
+    return bool(_DATE_RE.search(message or ""))
+
+
 def slot_report(source_code: str, dest_code: str, results: list, login_url: str = "") -> str:
     """
-    Builds the slot-report message for ONE route.
+    Builds the slot-report message for ONE route — ONLY for combinations that
+    actually have a slot.
+
+    Combinations with no availability or a config error (no date in their text)
+    are dropped. If NONE of the combinations have a slot, this returns an empty
+    string and the caller should send nothing.
 
     Args:
         source_code / dest_code: e.g. 'AE' / 'DNK'.
@@ -72,13 +90,18 @@ def slot_report(source_code: str, dest_code: str, results: list, login_url: str 
         login_url: the portal's login URL, shown as a clickable link.
 
     Returns:
-        The formatted message string. Edit the layout below to taste.
+        The formatted message string, or "" if there are no slots to report.
     """
     flag = _flag(dest_code)
     prefix = f"{flag} " if flag else ""
 
+    # Keep only combinations that actually have a slot date.
+    available = [(label, message) for label, message in results if _has_slot(message)]
+    if not available:
+        return ""  # nothing available -> caller sends no message
+
     lines = []
-    for label, message in results:
+    for label, message in available:
         full_label = _label_with_country(label, dest_code)
         lines.append(f"{prefix}{full_label}:")
         lines.append(f"  {message}")
