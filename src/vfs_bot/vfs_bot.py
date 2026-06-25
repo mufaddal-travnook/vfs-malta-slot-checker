@@ -763,6 +763,12 @@ class VfsBot(ABC):
             login_url,
         )
 
+        # Only notify when there's an actual slot. slot_report() returns "" when
+        # no combination has availability, so we skip sending entirely.
+        if not report:
+            logging.info("No available slots for this route — no Telegram message sent.")
+            return
+
         logging.info("Slot report:\n" + report)
         if telegram.is_configured():
             telegram.send_message(report)
