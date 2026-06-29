@@ -114,14 +114,21 @@ def slot_report(source_code: str, dest_code: str, results: list, login_url: str 
 
 
 def failure_alert(source_code: str, dest_code: str, error: str, attempts: int,
-                  login_url: str = "") -> str:
-    """Builds the 'run failed' alert message for ONE route."""
+                  login_url: str = "", email: str = "") -> str:
+    """Builds the 'run failed' alert message for ONE route.
+
+    Shows the destination country name, the account that failed, how many
+    attempts were made, and the reason.
+    """
     flag = _flag(dest_code)
     prefix = f"{flag} " if flag else ""
+    country = _country(dest_code)
     msg = (
-        f"⚠️ {prefix}{source_code.upper()}-{dest_code.upper()} slot check FAILED "
-        f"after {attempts} attempt(s).\n\nLast error:\n{error}"
+        f"⚠️ {prefix}{country} slot check FAILED after {attempts} attempt(s)."
     )
+    if email:
+        msg += f"\nAccount: {email}"
+    msg += f"\n\nLast error:\n{error}"
     if login_url:
         msg += f"\n\nLink to visa center site ({login_url})"
     return msg

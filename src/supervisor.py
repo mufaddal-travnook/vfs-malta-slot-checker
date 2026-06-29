@@ -176,10 +176,18 @@ def run_all_routes() -> bool:
 def _alert_failure(source: str, dest: str, error: str, attempts: int) -> None:
     """Sends a Telegram alert that the run failed (best-effort).
 
-    Message layout lives in src/utils/telegram_message.py — edit it there.
+    Includes the account (email) that was used for this hour, so you know which
+    credential failed. Message layout lives in src/utils/telegram_message.py.
     """
     login_url = _vfs_url(source, dest) or ""
-    msg = telegram_message.failure_alert(source, dest, error, attempts, login_url)
+    # The account in use this hour — the same one the bot tried (rotation is by
+    # clock hour, so recomputing here gives the same email).
+    from datetime import datetime
+    from src.utils import credentials
+    email, _ = credentials.get_credential(datetime.now().hour)
+    msg = telegram_message.failure_alert(
+        source, dest, error, attempts, login_url, email or ""
+    )
     logging.error(msg)
     if telegram.is_configured():
         telegram.send_message(msg)
