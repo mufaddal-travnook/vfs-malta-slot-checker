@@ -75,6 +75,7 @@ src/
     chrome_launcher.py     # launches/owns/kills a real Chrome (CDP), cross-platform
     telegram.py            # sends reports via the Telegram Bot API
     telegram_message.py    # EDITABLE message templates (route-aware: flag, link)
+    credentials.py         # multiple-account hour-based rotation
   vfs_bot/
     vfs_bot.py             # the flow: login → Turnstile → Step 1 → read slots
     vfs_bot_factory.py     # builds the schema-driven bot for a route
@@ -225,6 +226,42 @@ DESTINATION_FLAGS = {
 If you forget, the message simply omits the flag (still correct — it never
 mislabels). Functions in the file: `slot_report(...)` (the slot message) and
 `failure_alert(...)` (the failure message).
+
+---
+
+## Multiple accounts (hour-based rotation)
+
+You can run under several VFS accounts and rotate them by the clock hour — useful
+to spread load / avoid per-account rate limits.
+
+Create a gitignored `config/credentials.local.ini` (copy
+[`config/credentials.local.ini.example`](config/credentials.local.ini.example)):
+
+```ini
+[cred1]
+email = account1@example.com
+password = your-password-1
+
+[cred2]
+email = account2@example.com
+password = your-password-2
+; ...as many [credN] as you like, in order
+```
+
+**Rotation:** `cred1` is used at the first run hour of the day (**06:00**), `cred2`
+at 07:00, and so on, wrapping after the last account
+(`index = (hour - 6) % N`). Both runs within an hour (`:29` and `:59`) use the
+**same** account, and **all URLs in a run** use that account.
+
+If the file is absent, the bot falls back to the single `[vfs-credential]`
+account — existing setups keep working unchanged. The active account is logged
+each run (email masked). Preview the schedule:
+
+```bash
+python -c "from src.utils.config_reader import initialize_config as i; i(); \
+from src.utils import credentials as c; \
+[print(h, 'cred'+str(idx), em) for h,idx,em in c.rotation_schedule()]"
+```
 
 ---
 

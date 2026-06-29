@@ -143,8 +143,10 @@ class VfsBot(ABC):
             )
             return False
 
-        email_id = get_config_value("vfs-credential", "email")
-        password = get_config_value("vfs-credential", "password")
+        # Pick the credential for this hour (rotates across multiple accounts if
+        # config/credentials.local.ini is set up; else the single account).
+        from src.utils import credentials
+        email_id, password = credentials.get_credential(datetime.now().hour)
 
         os.makedirs(SCREENSHOT_DIR, exist_ok=True)
 
