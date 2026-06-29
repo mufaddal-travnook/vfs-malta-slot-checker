@@ -35,7 +35,11 @@ from src.utils.config_reader import (
     initialize_config,
     set_config_value,
 )
-from src.vfs_bot.vfs_bot import GeoBlockedError, RetryableError
+from src.vfs_bot.vfs_bot import (
+    EmailNotRegisteredError,
+    GeoBlockedError,
+    RetryableError,
+)
 from src.vfs_bot.vfs_bot_factory import UnsupportedCountryError, get_vfs_bot
 
 # Retry policy. The EC2 box is slow, so individual UI actions occasionally time
@@ -89,6 +93,11 @@ def run(source: str = "AE", dest: str = "MT") -> bool:
             # run() returning False shouldn't normally happen (it raises on
             # failure), but treat it as a failed attempt to be safe.
             last_error = "Flow returned without completing."
+        except EmailNotRegisteredError as e:
+            # Expected, not an error: this account isn't registered for this URL.
+            # Skip it silently (no retries, no Telegram alert) and move on.
+            logging.info(f"{source}-{dest}: account not registered here — skipping. ({e})")
+            return True  # not a failure; nothing to alert about
         except GeoBlockedError as e:
             # Non-retryable: VFS geo-blocked the IP (403203). Retrying uses the
             # same IP and fails identically — stop now, no further attempts.

@@ -90,6 +90,17 @@ class GeoBlockedError(Exception):
     """
 
 
+class EmailNotRegisteredError(Exception):
+    """
+    The login page showed 'The entered email id is not registered with us' — the
+    current account simply isn't registered for THIS portal.
+
+    NOT retryable (the same email will never work here) and NOT an error worth
+    alerting about — the supervisor should just SKIP this URL for this account
+    and move on to the next URL.
+    """
+
+
 class VfsBot(ABC):
     """
     Slot-check bot for the VFS Malta portal.
@@ -213,9 +224,10 @@ class VfsBot(ABC):
 
             try:
                 self.login(page, email_id, password)
-            except GeoBlockedError:
-                # Non-retryable: the IP is geo-blocked, a fresh browser won't help.
-                # Let it propagate so the supervisor stops without retrying.
+            except (GeoBlockedError, EmailNotRegisteredError):
+                # Non-retryable & expected: geo-block (same IP won't help) or the
+                # email isn't registered here (skip this URL). Let it propagate so
+                # the supervisor handles it without retrying.
                 raise
             except RetryableError:
                 # A classified, expected failure — screenshot the end state and
@@ -618,12 +630,28 @@ class VfsBot(ABC):
                 raise RetryableError(f"Could not click Sign In: {e}") from e
         VfsBot._take_final_screenshot(page, "after_signin")
 
+        # If the portal says this email isn't registered for THIS site, there's
+        # nothing to wait for and nothing to retry — skip this URL for this
+        # account immediately. Give the banner a moment to render first.
+        page.wait_for_timeout(2000)
+        if VfsBot._email_not_registered(page):
+            raise EmailNotRegisteredError(
+                "Login page: 'The entered email id is not registered with us' — "
+                "skipping this URL for this account."
+            )
+
         # After Sign In, Cloudflare often shows the 'Verify Captcha' dialog
         # (app-cloudflare-dialog with a Submit button) that BLOCKS the redirect
         # to the dashboard. It can appear at any moment during this wait, so we
         # poll: dismiss the dialog if present AND check whether we've landed on
         # the dashboard, for up to ~90s, instead of a single blind wait_for_url.
+        # We also keep checking for the 'not registered' banner during the wait.
         if not VfsBot._await_dashboard_handling_captcha(page, timeout_ms=90000):
+            if VfsBot._email_not_registered(page):
+                raise EmailNotRegisteredError(
+                    "Login page: 'The entered email id is not registered with us' — "
+                    "skipping this URL for this account."
+                )
             raise DashboardNotReachedError(
                 f"Did not reach /dashboard after Sign In (current URL: {page.url})."
             )
@@ -945,6 +973,10 @@ class VfsBot(ABC):
                     "VFS 'Permission Issues (403203)' — IP outside permitted "
                     "location or rate-limited. Not retrying."
                 )
+            # Stop early if this email isn't registered for this site — no point
+            # waiting; the caller skips this URL for this account.
+            if VfsBot._email_not_registered(page):
+                return False
             # Clear the captcha dialog if it's blocking the redirect.
             VfsBot._dismiss_captcha(page)
             page.wait_for_timeout(step_ms)
@@ -973,6 +1005,22 @@ class VfsBot(ABC):
         except Exception:
             return False
         return "403203" in body or "permission issues" in body
+
+    @staticmethod
+    def _email_not_registered(page) -> bool:
+        """
+        True if the login page is showing the 'email id is not registered'
+        banner — meaning the current account isn't registered for this portal.
+
+        Detected by the banner text so it works regardless of exact markup.
+        """
+        try:
+            body = (page.evaluate(
+                "() => document.body ? document.body.innerText : ''"
+            ) or "").lower()
+        except Exception:
+            return False
+        return "not registered with us" in body
 
     @staticmethod
     def _captcha_visible(page) -> bool:
